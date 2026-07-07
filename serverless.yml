@@ -1,0 +1,81 @@
+service: finvantage
+
+frameworkVersion: '3'
+useDotenv: true # <--- ĐÃ THÊM: Bắt buộc phải có để AWS đọc được link Supabase và Upstash trong file .env
+
+provider:
+  name: aws
+  runtime: nodejs20.x
+  region: ap-southeast-1
+  timeout: 30 # <--- ĐÃ THÊM: Kéo dài sự sống của hàm lên 30s để AI Bedrock có thời gian phân tích
+  stage: ${opt:stage, 'dev'}
+  environment:
+    DB_HOST: ${env:DB_HOST, 'localhost'}
+    DB_PORT: ${env:DB_PORT, '5432'}
+    DB_NAME: ${env:DB_NAME, 'finvantage'}
+    DB_USER: ${env:DB_USER, 'postgres'}
+    DB_PASSWORD: ${env:DB_PASSWORD, 'postgres'}
+    REDIS_URL: ${env:REDIS_URL, 'redis://localhost:6379'}
+    AWS_NODEJS_CONNECTION_REUSE_ENABLED: '1'
+  iam:
+    role:
+      statements:
+        # Cho phép đọc tệp từ S3 Raw Bucket
+        - Effect: Allow
+          Action:
+            - s3:GetObject
+            - s3:PutObject
+          Resource:
+            - arn:aws:s3:::${env:S3_RAW_BUCKET_NAME, 'finvantage-raw-invoices-dev'}/*
+        # Cho phép gọi API AnalyzeExpense của AWS Textract
+        - Effect: Allow
+          Action:
+            - textract:AnalyzeExpense
+          Resource:
+            - "*"
+        # Cho phép gọi AI Bedrock
+        - Effect: Allow
+          Action:
+            - bedrock:InvokeModel
+          Resource:
+            - "*"
+
+functions:
+  importInvoice:
+    handler: src/handlers/importHandler.handler
+    description: "API nhận thông tin nhập hóa đơn ban đầu và chuẩn bị upload"
+    events:
+      - http:
+          path: invoices/import
+          method: post
+          cors: true
+
+  ocrInvoice:
+    handler: src/handlers/ocrHandler.handler
+    description: "Trigger từ S3 bucket khi có file hóa đơn mới upload lên để chạy OCR bằng AWS Textract"
+    events:
+      # S3 event trigger: Tự động kích hoạt khi có tệp được tải lên thư mục uploads/
+      - s3:
+          bucket: ${env:S3_RAW_BUCKET_NAME, 'finvantage-raw-invoices-dev'}
+          event: s3:ObjectCreated:*
+          rules:
+            - prefix: uploads/
+          existing: true # Sử dụng nếu bucket đã tồn tại hoặc tự tạo
+
+  analyzeInvoice:
+    handler: src/handlers/analysisHandler.handler
+    description: "API thực hiện phân tích hóa đơn đã trích xuất bằng Amazon Bedrock"
+    events:
+      - http:
+          path: invoices/{id}/analyze
+          method: post
+          cors: true
+
+  paymentApi:
+    handler: src/handlers/paymentHandler.handler
+    description: "API xử lý thông tin thanh toán cho hóa đơn (phương thức giả lập)"
+    events:
+      - http:
+          path: payment
+          method: post
+          cors: true
