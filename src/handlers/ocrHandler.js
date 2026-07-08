@@ -2,53 +2,134 @@ import { extractInvoiceData } from '../services/textract.service.js';
 import { cacheInvoiceData } from '../services/db.service.js';
 import { logger } from '../utils/logger.js';
 
-// Hàm xử lý Lambda (Lambda handler) xử lý sự kiện S3 để kích hoạt quy trình OCR hóa đơn
-export const handler = async (event) => {
-  try {
-    logger.info('Nhận sự kiện trigger OCR từ S3', { recordsCount: event.Records?.length || 0 });
+const sanitizeInvoiceId = (objectKey) => {
+  const withoutUploadsPrefix = objectKey.replace(/^uploads\/+/i, '');
+  const withoutExtension = withoutUploadsPrefix.replace(/\.[^/.]+$/, '');
+  const sanitized = withoutExtension
+    .replace(/\\/g, '/')
+    .replace(/\/+/g, '-')
+    .replace(/[^a-zA-Z0-9_-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^[-_]+|[-_]+$/g, '');
 
-    if (!event.Records || event.Records.length === 0) {
-      logger.warn('Không tìm thấy bản ghi S3 event nào trong yêu cầu.');
-      return;
-    }
+  return sanitized || `invoice-${Date.now()}`;
+};
 
-    // Lặp qua từng bản ghi sự kiện S3
-    for (const record of event.Records) {
-      const bucketName = record.s3.bucket.name;
-      // Giải mã (decode) key để tránh các ký tự mã hóa URL (ví dụ: khoảng trắng chuyển thành +)
-      const objectKey = decodeURIComponent(record.s3.object.key.replace(/\+/g, ' '));
+const addText = (parts, value) => {
+  if (typeof value !== 'string') {
+    return;
+  }
 
-      logger.info(`Đang xử lý bản ghi S3: Bucket [${bucketName}], Key [${objectKey}]`);
-
-      // Bỏ qua các tệp không nằm trong thư mục uploads/
-      if (!objectKey.startsWith('uploads/')) {
-        logger.info(`Bỏ qua tệp tin vì không nằm trong thư mục 'uploads/': ${objectKey}`);
-        continue;
-      }
-
-      logger.info(`Kích hoạt trích xuất dữ liệu OCR từ AWS Textract cho tệp: ${objectKey}`);
-      const expenseDocuments = await extractInvoiceData(bucketName, objectKey);
-
-      logger.info('Trích xuất OCR từ AWS Textract thành công!', {
-        bucketName,
-        objectKey,
-        documentsCount: expenseDocuments.length
-      });
-
-      // Tạo khóa cache (cache key) duy nhất cho Redis
-      const cacheKey = `cache:invoice:${objectKey}`;
-      
-      logger.info(`Đang tiến hành lưu trữ tạm thời dữ liệu OCR vào Redis với khóa: ${cacheKey}`);
-      await cacheInvoiceData(cacheKey, expenseDocuments);
-
-      logger.info(`Invoice data cached successfully in Redis with key: [${cacheKey}]. Ready for AI Analysis.`);
-    }
-
-    logger.info('Hoàn tất xử lý sự kiện OCR từ S3.');
-  } catch (error) {
-    logger.error('Lỗi nghiêm trọng xảy ra trong quá trình xử lý sự kiện OCR', error);
-    throw error; // Ném lỗi (throw error) để AWS Lambda ghi nhận trạng thái thất bại của tác vụ nền
+  const text = value.replace(/\s+/g, ' ').trim();
+  if (text) {
+    parts.push(text);
   }
 };
 
+const addExpenseFieldText = (parts, field) => {
+  const label = field?.LabelDetection?.Text || field?.Type?.Text;
+  const value = field?.ValueDetection?.Text;
 
+  if (label && value) {
+    addText(parts, `${label}: ${value}`);
+    return;
+  }
+
+  addText(parts, label);
+  addText(parts, value);
+};
+
+export const extractRawTextFromExpenseDocuments = (expenseDocuments = []) => {
+  const parts = [];
+  const documents = Array.isArray(expenseDocuments) ? expenseDocuments : [];
+
+  for (const document of documents) {
+    for (const field of document?.SummaryFields || []) {
+      addExpenseFieldText(parts, field);
+    }
+
+    for (const group of document?.LineItemGroups || []) {
+      for (const lineItem of group?.LineItems || []) {
+        for (const field of lineItem?.LineItemExpenseFields || []) {
+          addExpenseFieldText(parts, field);
+        }
+      }
+    }
+  }
+
+  return [...new Set(parts)].join('\n');
+};
+
+export const handler = async (event) => {
+  try {
+    logger.info('Received OCR trigger from S3', { recordsCount: event.Records?.length || 0 });
+
+    if (!event.Records || event.Records.length === 0) {
+      logger.warn('No S3 event records found in OCR request.');
+      return;
+    }
+
+    for (const record of event.Records) {
+      const bucketName = record.s3.bucket.name;
+      const objectKey = decodeURIComponent(record.s3.object.key.replace(/\+/g, ' '));
+
+      logger.info('Processing S3 OCR record', { bucketName, objectKey });
+
+      if (!objectKey.startsWith('uploads/')) {
+        logger.info('Skipping file outside uploads prefix', { objectKey });
+        continue;
+      }
+
+      logger.info('Starting Textract invoice OCR extraction', { bucketName, objectKey });
+      const expenseDocuments = await extractInvoiceData(bucketName, objectKey);
+
+      const invoiceId = sanitizeInvoiceId(objectKey);
+      const primaryCacheKey = `ocr:${invoiceId}`;
+      const legacyCacheKey = `cache:invoice:${objectKey}`;
+      const rawText = extractRawTextFromExpenseDocuments(expenseDocuments);
+      const createdAt = new Date().toISOString();
+      const cachedInvoice = {
+        invoiceId,
+        rawText,
+        raw_text: rawText,
+        sourceFileKey: objectKey,
+        source_file_key: objectKey,
+        expenseDocuments,
+        createdAt
+      };
+
+      logger.info('Textract OCR extraction completed', {
+        objectKey,
+        invoiceId,
+        primaryCacheKey,
+        legacyCacheKey,
+        documentsCount: expenseDocuments.length,
+        rawTextLength: rawText.length
+      });
+
+      if (!rawText) {
+        logger.warn('Textract OCR result did not contain raw text', {
+          objectKey,
+          invoiceId,
+          primaryCacheKey,
+          legacyCacheKey
+        });
+      }
+
+      await cacheInvoiceData(primaryCacheKey, cachedInvoice);
+      await cacheInvoiceData(legacyCacheKey, cachedInvoice);
+
+      logger.info('OCR invoice data cached in Redis', {
+        objectKey,
+        invoiceId,
+        primaryCacheKey,
+        legacyCacheKey
+      });
+    }
+
+    logger.info('Finished processing OCR S3 event.');
+  } catch (error) {
+    logger.error('Failed to process OCR S3 event', error);
+    throw error;
+  }
+};
