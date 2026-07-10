@@ -2,7 +2,7 @@ import { TextractClient, AnalyzeExpenseCommand } from '@aws-sdk/client-textract'
 
 // Khởi tạo Textract Client cho các tác vụ trích xuất dữ liệu tài liệu (OCR)
 export const textractClient = new TextractClient({
-  region: process.env.AWS_REGION || 'ap-southeast-1'
+  region: process.env.AWS_REGION || process.env.AWS_REGION_NAME || 'ap-southeast-1'
 });
 
 /**

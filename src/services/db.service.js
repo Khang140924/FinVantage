@@ -3,6 +3,7 @@ import { createClient } from 'redis';
 import { dbConfig } from '../config/db.config.js';
 
 const { Pool } = pg;
+const DEFAULT_USER_ID = 'demo-user';
 
 export const pgPool = new Pool({
   host: dbConfig.host,
@@ -52,7 +53,7 @@ const normalizeInvoiceInput = (invoiceData = {}) => {
 
   return {
     invoiceId: invoiceData.invoiceId ?? invoiceData.id ?? null,
-    userId: invoiceData.userId ?? invoiceData.user_id ?? null,
+    userId: invoiceData.userId || invoiceData.user_id || DEFAULT_USER_ID,
     storeName: invoiceData.storeName ?? invoiceData.store_name ?? invoiceData.VendorName ?? 'Unknown',
     totalAmount: Number.isFinite(totalAmount) ? totalAmount : 0,
     category: invoiceData.category ?? invoiceData.Category ?? 'Khác',

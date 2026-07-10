@@ -5,6 +5,10 @@
   "main": "src/handlers/importHandler.js",
   "type": "module",
   "scripts": {
+    "api:dev": "serverless offline --stage dev",
+    "frontend:dev": "npm --prefix frontend run dev",
+    "frontend:build": "npm --prefix frontend run build",
+    "frontend:preview": "npm --prefix frontend run preview",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
@@ -20,6 +24,7 @@
     "redis": "^4.6.15"
   },
   "devDependencies": {
-    "serverless": "^3.38.0"
+    "serverless": "^3.38.0",
+    "serverless-offline": "^13.10.1"
   }
 }

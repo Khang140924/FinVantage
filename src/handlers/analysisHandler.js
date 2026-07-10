@@ -3,6 +3,8 @@ import { getInvoiceFromCache, saveParsedInvoice } from '../services/db.service.j
 import * as response from '../utils/response.js';
 import { logger } from '../utils/logger.js';
 
+const DEFAULT_USER_ID = 'demo-user';
+
 const parseBody = (event) => {
   if (!event?.body) {
     return {};
@@ -49,7 +51,7 @@ export const handler = async (event = {}) => {
   }
 
   const cacheKey = body.cacheKey || `ocr:${invoiceId}`;
-  const userId = body.userId || null;
+  const userId = body.userId || DEFAULT_USER_ID;
 
   try {
     logger.info('Starting invoice analysis flow', { invoiceId, cacheKey, userId });

@@ -1,64 +1,8 @@
 import { extractInvoiceData } from '../services/textract.service.js';
 import { cacheInvoiceData } from '../services/db.service.js';
 import { logger } from '../utils/logger.js';
-
-const sanitizeInvoiceId = (objectKey) => {
-  const withoutUploadsPrefix = objectKey.replace(/^uploads\/+/i, '');
-  const withoutExtension = withoutUploadsPrefix.replace(/\.[^/.]+$/, '');
-  const sanitized = withoutExtension
-    .replace(/\\/g, '/')
-    .replace(/\/+/g, '-')
-    .replace(/[^a-zA-Z0-9_-]+/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^[-_]+|[-_]+$/g, '');
-
-  return sanitized || `invoice-${Date.now()}`;
-};
-
-const addText = (parts, value) => {
-  if (typeof value !== 'string') {
-    return;
-  }
-
-  const text = value.replace(/\s+/g, ' ').trim();
-  if (text) {
-    parts.push(text);
-  }
-};
-
-const addExpenseFieldText = (parts, field) => {
-  const label = field?.LabelDetection?.Text || field?.Type?.Text;
-  const value = field?.ValueDetection?.Text;
-
-  if (label && value) {
-    addText(parts, `${label}: ${value}`);
-    return;
-  }
-
-  addText(parts, label);
-  addText(parts, value);
-};
-
-export const extractRawTextFromExpenseDocuments = (expenseDocuments = []) => {
-  const parts = [];
-  const documents = Array.isArray(expenseDocuments) ? expenseDocuments : [];
-
-  for (const document of documents) {
-    for (const field of document?.SummaryFields || []) {
-      addExpenseFieldText(parts, field);
-    }
-
-    for (const group of document?.LineItemGroups || []) {
-      for (const lineItem of group?.LineItems || []) {
-        for (const field of lineItem?.LineItemExpenseFields || []) {
-          addExpenseFieldText(parts, field);
-        }
-      }
-    }
-  }
-
-  return [...new Set(parts)].join('\n');
-};
+import { buildOcrCacheKey, sanitizeInvoiceId } from '../utils/invoice.js';
+import { normalizeOcrCachePayload } from '../utils/textractExpense.js';
 
 export const handler = async (event) => {
   try {
@@ -84,19 +28,13 @@ export const handler = async (event) => {
       const expenseDocuments = await extractInvoiceData(bucketName, objectKey);
 
       const invoiceId = sanitizeInvoiceId(objectKey);
-      const primaryCacheKey = `ocr:${invoiceId}`;
+      const primaryCacheKey = buildOcrCacheKey(invoiceId);
       const legacyCacheKey = `cache:invoice:${objectKey}`;
-      const rawText = extractRawTextFromExpenseDocuments(expenseDocuments);
-      const createdAt = new Date().toISOString();
-      const cachedInvoice = {
+      const cachedInvoice = normalizeOcrCachePayload({
         invoiceId,
-        rawText,
-        raw_text: rawText,
-        sourceFileKey: objectKey,
-        source_file_key: objectKey,
-        expenseDocuments,
-        createdAt
-      };
+        fileKey: objectKey,
+        expenseDocuments
+      });
 
       logger.info('Textract OCR extraction completed', {
         objectKey,
@@ -104,10 +42,10 @@ export const handler = async (event) => {
         primaryCacheKey,
         legacyCacheKey,
         documentsCount: expenseDocuments.length,
-        rawTextLength: rawText.length
+        rawTextLength: cachedInvoice.rawText.length
       });
 
-      if (!rawText) {
+      if (!cachedInvoice.rawText) {
         logger.warn('Textract OCR result did not contain raw text', {
           objectKey,
           invoiceId,
