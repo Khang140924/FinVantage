@@ -1,13 +1,18 @@
 import dotenv from 'dotenv';
 
-// Tải các environment variables (biến môi trường) từ tệp .env
 dotenv.config();
 
+const parsedDbPort = Number.parseInt(process.env.DB_PORT || '', 10);
+
 export const dbConfig = {
-  host: process.env.DB_HOST || 'localhost',
-  port: parseInt(process.env.DB_PORT || '5432', 10),
-  database: process.env.DB_NAME || 'finvantage',
-  user: process.env.DB_USER || 'postgres',
-  password: process.env.DB_PASSWORD || 'postgres',
-  ssl: process.env.DB_SSL === 'true' // Bật SSL nếu cấu hình môi trường là true
+  host: process.env.DB_HOST,
+  port: Number.isNaN(parsedDbPort) ? undefined : parsedDbPort,
+  database: process.env.DB_NAME,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false
+};
+
+export const redisConfig = {
+  url: process.env.REDIS_URL
 };

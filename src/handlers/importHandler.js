@@ -28,9 +28,13 @@ export const handler = async (event) => {
     logger.info(`Đang sinh presigned URL cho tệp: ${fileName}, kiểu: ${contentType}`);
     const uploadData = await generateUploadUrl(fileName, contentType);
 
-    logger.info('Sinh presigned URL thành công', { fileKey: uploadData.fileKey });
+    logger.info('Sinh presigned URL thành công', {
+      fileKey: uploadData.fileKey,
+      invoiceId: uploadData.invoiceId,
+      cacheKey: uploadData.cacheKey
+    });
 
-    // Phản hồi thành công với uploadUrl và fileKey
+    // Phản hồi thành công với uploadUrl, fileKey, invoiceId và cacheKey
     return response.success({
       message: 'Sinh đường dẫn tải lên (upload presigned URL) thành công!',
       ...uploadData

@@ -3,135 +3,213 @@ import { createClient } from 'redis';
 import { dbConfig } from '../config/db.config.js';
 
 const { Pool } = pg;
+const DEFAULT_USER_ID = 'demo-user';
 
-// Khởi tạo PostgreSQL Connection Pool (bể chứa kết nối cơ sở dữ liệu)
 export const pgPool = new Pool({
   host: dbConfig.host,
   port: dbConfig.port,
   database: dbConfig.database,
   user: dbConfig.user,
   password: dbConfig.password,
-  // Bật SSL nếu được cấu hình (thường dùng cho AWS RDS trong production)
   ssl: dbConfig.ssl ? { rejectUnauthorized: false } : false
 });
 
-// Khởi tạo Redis Client
 export const redisClient = createClient({
   url: process.env.REDIS_URL || 'redis://localhost:6379'
 });
 
-redisClient.on('error', (err) => console.error('Lỗi kết nối Redis Client:', err));
+redisClient.on('error', (err) => console.error('Redis client connection error:', err));
 
-/**
- * Hàm đảm bảo kết nối Redis Client đã được mở trước khi thực hiện các truy vấn
- */
 export const connectRedis = async () => {
   if (!redisClient.isOpen) {
-    try {
-      await redisClient.connect();
-    } catch (error) {
-      console.error('Không thể kết nối đến Redis Server:', error);
-      throw error;
-    }
+    await redisClient.connect();
   }
 };
 
-/**
- * Lưu trữ dữ liệu hóa đơn vào Redis cache (bộ nhớ đệm Redis) với thời gian hết hạn (TTL - Time To Live)
- * @param {string} cacheKey - Khóa bộ nhớ đệm (Cache Key)
- * @param {any} data - Dữ liệu hóa đơn cần lưu trữ (sẽ được chuyển sang JSON string)
- * @param {number} ttlSeconds - Thời gian sống của dữ liệu cache tính bằng giây (mặc định 3600 giây = 1 giờ)
- */
 export const cacheInvoiceData = async (cacheKey, data, ttlSeconds = 3600) => {
   try {
-    // Đảm bảo kết nối Redis hoạt động
     await connectRedis();
-
-    const stringifiedData = JSON.stringify(data);
-    
-    // Ghi dữ liệu vào Redis kèm theo TTL sử dụng hàm setEx
-    await redisClient.setEx(cacheKey, ttlSeconds, stringifiedData);
+    await redisClient.setEx(cacheKey, ttlSeconds, JSON.stringify(data));
   } catch (error) {
-    console.error(`Lỗi khi ghi dữ liệu hóa đơn vào Redis cache với khóa [${cacheKey}]:`, error);
+    console.error(`Failed to cache invoice data with key [${cacheKey}]:`, error);
     throw error;
   }
 };
 
-/**
- * Lấy dữ liệu hóa đơn thô từ Redis cache và phân tích thành đối tượng JS
- * @param {string} cacheKey - Khóa bộ nhớ đệm (Cache Key)
- * @returns {Promise<any>} - Dữ liệu hóa đơn đã được giải mã từ JSON (hoặc null nếu không tìm thấy)
- */
 export const getInvoiceFromCache = async (cacheKey) => {
   try {
-    // Đảm bảo kết nối Redis hoạt động
     await connectRedis();
 
     const data = await redisClient.get(cacheKey);
-    if (!data) {
-      return null;
-    }
-    return JSON.parse(data);
+    return data ? JSON.parse(data) : null;
   } catch (error) {
-    console.error(`Lỗi khi lấy dữ liệu hóa đơn từ Redis với khóa [${cacheKey}]:`, error);
+    console.error(`Failed to get invoice data from cache with key [${cacheKey}]:`, error);
     throw error;
   }
 };
 
-/**
- * Lưu hóa đơn đã phân tích bằng AI vào bảng 'invoices' trong PostgreSQL
- * @param {object} invoiceData - Dữ liệu hóa đơn gồm: VendorName, TotalAmount, TaxAmount, Date, FinancialAdvice
- * @returns {Promise<object>} - Dòng dữ liệu hóa đơn vừa được chèn thành công trong database
- */
+const normalizeInvoiceInput = (invoiceData = {}) => {
+  const totalAmount = Number(invoiceData.totalAmount ?? invoiceData.TotalAmount ?? 0);
+
+  return {
+    invoiceId: invoiceData.invoiceId ?? invoiceData.id ?? null,
+    userId: invoiceData.userId || invoiceData.user_id || DEFAULT_USER_ID,
+    storeName: invoiceData.storeName ?? invoiceData.store_name ?? invoiceData.VendorName ?? 'Unknown',
+    totalAmount: Number.isFinite(totalAmount) ? totalAmount : 0,
+    category: invoiceData.category ?? invoiceData.Category ?? 'Khác',
+    aiAdvice: invoiceData.aiAdvice ?? invoiceData.ai_advice ?? invoiceData.FinancialAdvice ?? null,
+    rawText: invoiceData.rawText ?? invoiceData.raw_text ?? null,
+    sourceFileKey: invoiceData.sourceFileKey ?? invoiceData.source_file_key ?? null,
+    status: invoiceData.status ?? 'PENDING'
+  };
+};
+
+const invoiceColumns = [
+  'user_id',
+  'store_name',
+  'total_amount',
+  'category',
+  'ai_advice',
+  'raw_text',
+  'source_file_key',
+  'status'
+];
+
+const invoiceValues = (invoice) => [
+  invoice.userId,
+  invoice.storeName,
+  invoice.totalAmount,
+  invoice.category,
+  invoice.aiAdvice,
+  invoice.rawText,
+  invoice.sourceFileKey,
+  invoice.status
+];
+
 export const saveParsedInvoice = async (invoiceData) => {
-  const query = `
-    INSERT INTO invoices (vendor_name, total_amount, tax_amount, invoice_date, financial_advice)
-    VALUES ($1, $2, $3, $4, $5)
-    RETURNING *
-  `;
-  const values = [
-    invoiceData.VendorName,
-    invoiceData.TotalAmount,
-    invoiceData.TaxAmount,
-    invoiceData.Date,
-    invoiceData.FinancialAdvice
-  ];
+  const invoice = normalizeInvoiceInput(invoiceData);
+
+  const columns = invoice.invoiceId ? ['id', ...invoiceColumns] : invoiceColumns;
+  const values = invoice.invoiceId ? [invoice.invoiceId, ...invoiceValues(invoice)] : invoiceValues(invoice);
+  const placeholders = columns.map((_, index) => `$${index + 1}`);
+
+  const updateAssignments = invoiceColumns
+    .map((column) => `${column} = EXCLUDED.${column}`)
+    .concat('updated_at = NOW()')
+    .join(', ');
+
+  const query = invoice.invoiceId
+    ? `
+      INSERT INTO invoices (${columns.join(', ')})
+      VALUES (${placeholders.join(', ')})
+      ON CONFLICT (id) DO UPDATE SET ${updateAssignments}
+      RETURNING *
+    `
+    : `
+      INSERT INTO invoices (${columns.join(', ')})
+      VALUES (${placeholders.join(', ')})
+      RETURNING *
+    `;
 
   try {
-    const res = await pgPool.query(query, values);
-    return res.rows[0];
+    const result = await pgPool.query(query, values);
+    return result.rows[0];
   } catch (error) {
-    console.error('Lỗi khi thực thi lưu hóa đơn đã phân tích vào PostgreSQL:', error);
+    console.error('Failed to save parsed invoice to PostgreSQL:', error);
     throw error;
   }
 };
 
-/**
- * Cập nhật trạng thái thanh toán của hóa đơn trong PostgreSQL
- * @param {number|string} invoiceId - ID của hóa đơn cần cập nhật
- * @param {string} status - Trạng thái mới (ví dụ: PAID, UNPAID, PENDING)
- * @returns {Promise<object>} - Bản ghi hóa đơn sau khi đã cập nhật trạng thái
- */
+export const getInvoicesByUser = async (userId) => {
+  if (!userId) {
+    throw new Error('userId is required to get invoices.');
+  }
+
+  const query = `
+    SELECT *
+    FROM invoices
+    WHERE user_id = $1
+    ORDER BY created_at DESC NULLS LAST, id DESC
+  `;
+
+  try {
+    const result = await pgPool.query(query, [userId]);
+    return result.rows;
+  } catch (error) {
+    console.error(`Failed to get invoices for user [${userId}]:`, error);
+    throw error;
+  }
+};
+
+export const getDashboardSummary = async (userId) => {
+  if (!userId) {
+    throw new Error('userId is required to get dashboard summary.');
+  }
+
+  const summaryQuery = `
+    SELECT
+      COUNT(*)::int AS total_invoices,
+      COALESCE(SUM(total_amount), 0)::float AS total_amount,
+      COALESCE(SUM(CASE WHEN status = 'PAID' THEN total_amount ELSE 0 END), 0)::float AS paid_amount,
+      COALESCE(SUM(CASE WHEN status <> 'PAID' OR status IS NULL THEN total_amount ELSE 0 END), 0)::float AS unpaid_amount,
+      COUNT(*) FILTER (WHERE status = 'PAID')::int AS paid_count,
+      COUNT(*) FILTER (WHERE status <> 'PAID' OR status IS NULL)::int AS unpaid_count
+    FROM invoices
+    WHERE user_id = $1
+  `;
+
+  const categoryQuery = `
+    SELECT
+      COALESCE(category, 'Khác') AS category,
+      COUNT(*)::int AS invoice_count,
+      COALESCE(SUM(total_amount), 0)::float AS total_amount
+    FROM invoices
+    WHERE user_id = $1
+    GROUP BY COALESCE(category, 'Khác')
+    ORDER BY total_amount DESC
+  `;
+
+  try {
+    const [summaryResult, categoryResult] = await Promise.all([
+      pgPool.query(summaryQuery, [userId]),
+      pgPool.query(categoryQuery, [userId])
+    ]);
+
+    return {
+      ...summaryResult.rows[0],
+      categories: categoryResult.rows
+    };
+  } catch (error) {
+    console.error(`Failed to get dashboard summary for user [${userId}]:`, error);
+    throw error;
+  }
+};
+
 export const updateInvoicePaymentStatus = async (invoiceId, status) => {
+  if (!invoiceId) {
+    throw new Error('invoiceId is required to update payment status.');
+  }
+
+  if (!status) {
+    throw new Error('status is required to update payment status.');
+  }
+
   const query = `
     UPDATE invoices
     SET status = $1, updated_at = NOW()
     WHERE id = $2
     RETURNING *
   `;
-  const values = [status, invoiceId];
 
   try {
-    const res = await pgPool.query(query, values);
-    if (res.rows.length === 0) {
-      throw new Error(`Không tìm thấy hóa đơn nào với ID: [${invoiceId}]`);
+    const result = await pgPool.query(query, [status, invoiceId]);
+    if (result.rows.length === 0) {
+      throw new Error(`Invoice not found with id: [${invoiceId}]`);
     }
-    return res.rows[0];
+
+    return result.rows[0];
   } catch (error) {
-    console.error(`Lỗi khi cập nhật trạng thái thanh toán hóa đơn [ID: ${invoiceId}]:`, error);
+    console.error(`Failed to update payment status for invoice [${invoiceId}]:`, error);
     throw error;
   }
 };
-
-
-

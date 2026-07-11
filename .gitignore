@@ -1,0 +1,14 @@
+.env
+node_modules/
+uploads/
+data/
+!frontend/src/data/
+!frontend/src/data/mockData.js
+.serverless/
+.webpack/
+dist/
+build/
+serverless-offline*.log
+*.log
+
+frontend/.env.local

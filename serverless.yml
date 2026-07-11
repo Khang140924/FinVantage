@@ -3,6 +3,9 @@ service: finvantage
 frameworkVersion: '3'
 useDotenv: true # <--- ĐÃ THÊM: Bắt buộc phải có để AWS đọc được link Supabase và Upstash trong file .env
 
+plugins:
+  - serverless-offline
+
 provider:
   name: aws
   runtime: nodejs20.x
@@ -10,12 +13,17 @@ provider:
   timeout: 30 # <--- ĐÃ THÊM: Kéo dài sự sống của hàm lên 30s để AI Bedrock có thời gian phân tích
   stage: ${opt:stage, 'dev'}
   environment:
+    AWS_REGION_NAME: ${env:AWS_REGION_NAME, 'ap-southeast-1'}
+    S3_RAW_BUCKET_NAME: ${env:S3_RAW_BUCKET_NAME, env:S3_BUCKET_NAME, 'finvantage-raw-invoices-dev'}
+    S3_BUCKET_NAME: ${env:S3_BUCKET_NAME, env:S3_RAW_BUCKET_NAME, 'finvantage-raw-invoices-dev'}
+    BEDROCK_MODEL_ID: ${env:BEDROCK_MODEL_ID, 'anthropic.claude-3-haiku-20240307-v1:0'}
     DB_HOST: ${env:DB_HOST, 'localhost'}
     DB_PORT: ${env:DB_PORT, '5432'}
     DB_NAME: ${env:DB_NAME, 'finvantage'}
     DB_USER: ${env:DB_USER, 'postgres'}
     DB_PASSWORD: ${env:DB_PASSWORD, 'postgres'}
     REDIS_URL: ${env:REDIS_URL, 'redis://localhost:6379'}
+    USE_MOCK_AI: ${env:USE_MOCK_AI, 'true'}
     AWS_NODEJS_CONNECTION_REUSE_ENABLED: '1'
   iam:
     role:
@@ -26,7 +34,7 @@ provider:
             - s3:GetObject
             - s3:PutObject
           Resource:
-            - arn:aws:s3:::${env:S3_RAW_BUCKET_NAME, 'finvantage-raw-invoices-dev'}/*
+            - arn:aws:s3:::${env:S3_RAW_BUCKET_NAME, env:S3_BUCKET_NAME, 'finvantage-raw-invoices-dev'}/*
         # Cho phép gọi API AnalyzeExpense của AWS Textract
         - Effect: Allow
           Action:
@@ -56,7 +64,7 @@ functions:
     events:
       # S3 event trigger: Tự động kích hoạt khi có tệp được tải lên thư mục uploads/
       - s3:
-          bucket: ${env:S3_RAW_BUCKET_NAME, 'finvantage-raw-invoices-dev'}
+          bucket: ${env:S3_RAW_BUCKET_NAME, env:S3_BUCKET_NAME, 'finvantage-raw-invoices-dev'}
           event: s3:ObjectCreated:*
           rules:
             - prefix: uploads/
@@ -69,6 +77,33 @@ functions:
       - http:
           path: invoices/{id}/analyze
           method: post
+          cors: true
+
+  ocrInvoiceApi:
+    handler: src/handlers/ocrApiHandler.handler
+    description: "API chay OCR bang Amazon Textract cho file S3 da upload khi test local"
+    events:
+      - http:
+          path: invoices/{id}/ocr
+          method: post
+          cors: true
+
+  listInvoices:
+    handler: src/handlers/invoiceHandler.listInvoices
+    description: "API lấy danh sách hóa đơn đã phân tích theo user"
+    events:
+      - http:
+          path: invoices
+          method: get
+          cors: true
+
+  dashboardSummary:
+    handler: src/handlers/invoiceHandler.dashboardSummary
+    description: "API lấy tổng quan dashboard tài chính theo user"
+    events:
+      - http:
+          path: dashboard-summary
+          method: get
           cors: true
 
   paymentApi:

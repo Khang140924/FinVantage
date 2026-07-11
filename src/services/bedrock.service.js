@@ -1,88 +1,166 @@
 import { BedrockRuntimeClient, InvokeModelCommand } from '@aws-sdk/client-bedrock-runtime';
 
-// Khởi tạo Bedrock Runtime Client để gọi các mô hình AI trên Amazon Bedrock
-export const bedrockClient = new BedrockRuntimeClient({
-  region: process.env.AWS_REGION || 'ap-southeast-1'
-});
+const DEFAULT_MODEL_ID = 'anthropic.claude-3-haiku-20240307-v1:0';
+const DEFAULT_REGION = 'ap-southeast-1';
+const VALID_CATEGORIES = [
+  'Ăn uống',
+  'Mua sắm',
+  'Di chuyển',
+  'Giải trí',
+  'Hóa đơn tiện ích',
+  'Y tế',
+  'Giáo dục',
+  'Khác'
+];
 
-/**
- * Sử dụng mô hình Amazon Bedrock AI (Claude 3 Haiku) để phân tích dữ liệu hóa đơn dạng OCR
- * và chuyển đổi thành cấu trúc JSON tiêu chuẩn.
- * @param {Array} ocrData - Dữ liệu hóa đơn thô thu được từ Textract
- * @returns {Promise<{VendorName: string, TotalAmount: number, TaxAmount: number, Date: string, FinancialAdvice: string}>}
- */
-export const analyzeInvoiceWithAI = async (ocrData) => {
-  try {
-    const modelId = 'anthropic.claude-3-haiku-20240307-v1:0';
+const getBedrockRegion = () => (
+  process.env.AWS_REGION ||
+  process.env.AWS_REGION_NAME ||
+  DEFAULT_REGION
+);
 
-    // Tạo prompt hướng dẫn mô hình trích xuất dữ liệu hóa đơn dạng JSON
-    const prompt = `Bạn là một trợ lý AI chuyên gia phân tích tài chính. Dưới đây là dữ liệu OCR trích xuất từ một hóa đơn:
-    
-    ${JSON.stringify(ocrData, null, 2)}
-    
-    Hãy phân tích kỹ văn bản OCR trên và trích xuất các trường thông tin sau.
-    BẮT BUỘC chỉ trả về duy nhất một đối tượng JSON hợp lệ (không kèm theo markdown codeblock hay bất kỳ lời giải thích nào khác), tuân thủ định dạng dưới đây:
-    {
-      "VendorName": "Tên nhà cung cấp hoặc công ty xuất hóa đơn",
-      "TotalAmount": tổng số tiền thanh toán (dưới dạng số thực hoặc số nguyên),
-      "TaxAmount": số tiền thuế VAT hoặc các loại thuế khác (dưới dạng số thực hoặc số nguyên, nếu không có hãy ghi null),
-      "Date": "Ngày lập hóa đơn định dạng YYYY-MM-DD (nếu không tìm thấy hãy ghi null)",
-      "FinancialAdvice": "Một câu lời khuyên tài chính ngắn gọn bằng Tiếng Việt dựa trên nội dung hóa đơn này (ví dụ: đánh giá về chi phí, tối ưu thuế hoặc ngân sách)."
-    }`;
-
-    // Khởi tạo JSON payload (khối dữ liệu JSON) theo định dạng yêu cầu của Claude 3 trên Bedrock
-    const payload = {
-      anthropic_version: 'bedrock-2023-05-31',
-      max_tokens: 1000,
-      messages: [
-        {
-          role: 'user',
-          content: [
-            {
-              type: 'text',
-              text: prompt
-            }
-          ]
-        }
-      ]
-    };
-
-    // Tạo lệnh gọi mô hình (InvokeModelCommand)
-    const command = new InvokeModelCommand({
-      modelId,
-      contentType: 'application/json',
-      accept: 'application/json',
-      body: JSON.stringify(payload)
-    });
-
-    // Thực thi lệnh và nhận phản hồi từ Bedrock
-    const response = await bedrockClient.send(command);
-
-    // Giải mã (decode) phản hồi nhận được
-    const responseBody = JSON.parse(new TextDecoder().decode(response.body));
-    const aiText = responseBody.content[0].text.trim();
-
-    // Hậu xử lý kết quả trả về của AI để trích xuất JSON nếu AI lỡ bọc trong markdown block
-    let jsonString = aiText;
-    if (aiText.includes('```json')) {
-      jsonString = aiText.substring(aiText.indexOf('```json') + 7, aiText.lastIndexOf('```')).trim();
-    } else if (aiText.includes('```')) {
-      jsonString = aiText.substring(aiText.indexOf('```') + 3, aiText.lastIndexOf('```')).trim();
-    }
-
-    // Phân tích cú pháp (parse) kết quả JSON của AI
-    const parsedResult = JSON.parse(jsonString);
-
-    return {
-      VendorName: parsedResult.VendorName || 'Unknown',
-      TotalAmount: Number(parsedResult.TotalAmount) || 0,
-      TaxAmount: parsedResult.TaxAmount !== null ? Number(parsedResult.TaxAmount) : null,
-      Date: parsedResult.Date || null,
-      FinancialAdvice: parsedResult.FinancialAdvice || 'Không có lời khuyên cụ thể cho hóa đơn này.'
-    };
-  } catch (error) {
-    console.error('Lỗi khi phân tích hóa đơn bằng Amazon Bedrock AI:', error);
-    throw error;
+const toRawText = (rawText) => {
+  if (typeof rawText === 'string') {
+    return rawText;
   }
+
+  return JSON.stringify(rawText ?? '', null, 2);
 };
 
+export const bedrockClient = new BedrockRuntimeClient({
+  region: getBedrockRegion()
+});
+
+export const safeParseJson = (text) => {
+  if (!text) {
+    return null;
+  }
+
+  if (typeof text === 'object') {
+    return text;
+  }
+
+  const raw = String(text).trim();
+  const candidates = [
+    raw,
+    raw.replace(/^```json\s*/i, '').replace(/\s*```$/i, '').trim(),
+    raw.replace(/^```\s*/i, '').replace(/\s*```$/i, '').trim()
+  ];
+
+  const firstBrace = raw.indexOf('{');
+  const lastBrace = raw.lastIndexOf('}');
+  if (firstBrace !== -1 && lastBrace > firstBrace) {
+    candidates.push(raw.slice(firstBrace, lastBrace + 1));
+  }
+
+  for (const candidate of candidates) {
+    try {
+      return JSON.parse(candidate);
+    } catch {
+      // Try the next candidate shape.
+    }
+  }
+
+  return null;
+};
+
+export const normalizeInvoiceResult = (data = {}) => {
+  const storeName = data.store_name || data.StoreName || data.VendorName;
+  const totalAmount = Number(data.total_amount ?? data.TotalAmount ?? 0);
+  const category = VALID_CATEGORIES.includes(data.category) ? data.category : 'Khác';
+  const advice = data.ai_advice || data.AIAdvice || data.FinancialAdvice;
+
+  return {
+    store_name: typeof storeName === 'string' && storeName.trim()
+      ? storeName.trim()
+      : 'Không xác định',
+    total_amount: Number.isFinite(totalAmount) ? totalAmount : 0,
+    category,
+    ai_advice: typeof advice === 'string' && advice.trim()
+      ? advice.trim()
+      : 'Hãy ghi lại khoản chi này và so sánh với ngân sách tháng để kiểm soát chi tiêu cá nhân tốt hơn.'
+  };
+};
+
+const buildPrompt = (rawText) => `Bạn là trợ lý AI chuyên phân tích hóa đơn cho quản lý chi tiêu cá nhân.
+
+Dữ liệu hóa đơn:
+${toRawText(rawText)}
+
+Hãy trích xuất thông tin và trả về duy nhất một object JSON hợp lệ, không markdown, không giải thích ngoài JSON.
+
+Schema bắt buộc:
+{
+  "store_name": "string",
+  "total_amount": number,
+  "category": "string",
+  "ai_advice": "string"
+}
+
+Quy tắc:
+- "category" chỉ được chọn một trong: ${VALID_CATEGORIES.join(', ')}.
+- "ai_advice" phải bằng tiếng Việt, tập trung vào quản lý chi tiêu cá nhân, tiết kiệm và kiểm soát ngân sách.
+- Không đưa lời khuyên bảo hành, pháp lý, y tế hoặc thông tin không liên quan.
+- Nếu không xác định được tên cửa hàng, dùng "Không xác định".
+- Nếu không xác định được tổng tiền, dùng 0.
+- Nếu không chắc category, dùng "Khác".`;
+
+export const analyzeInvoiceWithBedrock = async (rawText) => {
+  if (process.env.USE_MOCK_AI === 'true') {
+    return normalizeInvoiceResult({
+      store_name: 'Mock Store',
+      total_amount: 125000,
+      category: 'Khác',
+      ai_advice: 'Đây là kết quả mock để kiểm thử local. Hãy theo dõi khoản chi này trong ngân sách tháng và cân nhắc cắt giảm nếu vượt hạn mức.'
+    });
+  }
+
+  const modelId = process.env.BEDROCK_MODEL_ID || DEFAULT_MODEL_ID;
+  const payload = {
+    anthropic_version: 'bedrock-2023-05-31',
+    max_tokens: 800,
+    temperature: 0,
+    messages: [
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'text',
+            text: buildPrompt(rawText)
+          }
+        ]
+      }
+    ]
+  };
+
+  const command = new InvokeModelCommand({
+    modelId,
+    contentType: 'application/json',
+    accept: 'application/json',
+    body: JSON.stringify(payload)
+  });
+
+  const response = await bedrockClient.send(command);
+  const responseBody = JSON.parse(new TextDecoder().decode(response.body));
+  const aiText = responseBody?.content?.[0]?.text;
+  const parsedResult = safeParseJson(aiText);
+
+  if (!parsedResult) {
+    throw new Error('Amazon Bedrock response is not valid invoice JSON.');
+  }
+
+  return normalizeInvoiceResult(parsedResult);
+};
+
+// Backward-compatible wrapper for the existing analysis handler.
+export const analyzeInvoiceWithAI = async (rawText) => {
+  const result = await analyzeInvoiceWithBedrock(rawText);
+
+  return {
+    VendorName: result.store_name,
+    TotalAmount: result.total_amount,
+    TaxAmount: null,
+    Date: null,
+    FinancialAdvice: result.ai_advice
+  };
+};
