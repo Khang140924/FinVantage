@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "api:dev": "serverless offline --stage dev",
+    "auth:dev": "node auth-server/index.js",
     "frontend:dev": "npm --prefix frontend run dev",
     "frontend:build": "npm --prefix frontend run build",
     "frontend:preview": "npm --prefix frontend run preview",
@@ -19,7 +20,11 @@
     "@aws-sdk/client-s3": "^3.609.0",
     "@aws-sdk/client-textract": "^3.609.0",
     "@aws-sdk/s3-request-presigner": "^3.1080.0",
+    "aws-jwt-verify": "^4.0.1",
     "dotenv": "^16.4.5",
+    "express": "^4.21.1",
+    "express-session": "^1.18.1",
+    "openid-client": "^5.7.0",
     "pg": "^8.12.0",
     "redis": "^4.6.15"
   },

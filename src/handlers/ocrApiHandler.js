@@ -4,6 +4,7 @@ import * as response from '../utils/response.js';
 import { logger } from '../utils/logger.js';
 import { buildOcrCacheKey } from '../utils/invoice.js';
 import { normalizeOcrCachePayload } from '../utils/textractExpense.js';
+import { requireAuth } from '../utils/cognitoAuth.js';
 
 const parseBody = (event) => {
   if (!event?.body) {
@@ -81,6 +82,9 @@ const buildOcrErrorResponse = (error) => {
 
 export const handler = async (event = {}) => {
   const invoiceId = event.pathParameters?.id;
+
+  const auth = await requireAuth(event);
+  if (auth.error) return auth.error;
 
   if (!invoiceId) {
     logger.warn('OCR API request is missing invoiceId path parameter', {

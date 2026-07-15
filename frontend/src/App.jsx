@@ -6,12 +6,15 @@ import AnalysisResult from "./pages/AnalysisResult.jsx";
 import Transactions from "./pages/Transactions.jsx";
 import BudgetAlerts from "./pages/BudgetAlerts.jsx";
 import Settings from "./pages/Settings.jsx";
+import Login from "./pages/Login.jsx";
 import { useLanguage } from "./i18n/LanguageContext.jsx";
-import { DEFAULT_USER_ID, getDashboardSummary, getInvoices, isApiConfigured } from "./services/api.js";
+import { useAuth } from "./context/AuthContext.jsx";
+import { getDashboardSummary, getInvoices, isApiConfigured } from "./services/api.js";
 import { normalizeAnalysisPayload, normalizeInvoices } from "./utils/invoiceTransform.js";
 
 export default function App() {
   const { t } = useLanguage();
+  const { isAuthenticated, loading: authLoading } = useAuth();
   const [activePage, setActivePage] = useState("dashboard");
   const [searchQuery, setSearchQuery] = useState("");
   const [invoices, setInvoices] = useState([]);
@@ -47,8 +50,8 @@ export default function App() {
 
     try {
       const [invoiceData, summaryData] = await Promise.all([
-        getInvoices(DEFAULT_USER_ID),
-        getDashboardSummary(DEFAULT_USER_ID),
+        getInvoices(),
+        getDashboardSummary(),
       ]);
 
       setInvoices(normalizeInvoices(invoiceData.invoices));
@@ -122,6 +125,18 @@ export default function App() {
     }),
     [t]
   );
+
+  if (authLoading) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-100 text-slate-500 dark:bg-slate-950 dark:text-slate-400">
+        {t("auth.loading")}
+      </div>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return <Login />;
+  }
 
   return (
     <Layout

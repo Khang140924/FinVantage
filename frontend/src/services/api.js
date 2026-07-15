@@ -1,7 +1,6 @@
 const rawApiBaseUrl = import.meta.env.VITE_API_BASE_URL || "";
 
 export const API_BASE_URL = rawApiBaseUrl.replace(/\/+$/, "");
-export const DEFAULT_USER_ID = import.meta.env.VITE_DEMO_USER_ID || "demo-user";
 export const isApiConfigured = Boolean(API_BASE_URL);
 
 export class ApiError extends Error {
@@ -11,6 +10,14 @@ export class ApiError extends Error {
     this.status = status;
     this.data = data;
     this.code = code;
+  }
+}
+
+function getIdToken() {
+  try {
+    return window.localStorage.getItem("finvantage-id-token") || "";
+  } catch {
+    return "";
   }
 }
 
@@ -37,10 +44,17 @@ async function readResponseBody(response) {
 
 async function apiRequest(path, options = {}) {
   const url = buildApiUrl(path);
+  const idToken = getIdToken();
+
+  const headers = {
+    ...(options.headers || {}),
+    ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
+  };
+
   let response;
 
   try {
-    response = await fetch(url, options);
+    response = await fetch(url, { ...options, headers });
   } catch (error) {
     throw new ApiError("Network error while calling the backend.", {
       code: "NETWORK_ERROR",
@@ -51,6 +65,10 @@ async function apiRequest(path, options = {}) {
   const data = await readResponseBody(response);
 
   if (!response.ok) {
+    if (response.status === 401) {
+      window.localStorage.removeItem("finvantage-id-token");
+      window.location.href = "/auth/login";
+    }
     throw new ApiError(
       data?.message || data?.error || `Backend request failed with status ${response.status}.`,
       { status: response.status, data, code: "BACKEND_REQUEST_FAILED" }
@@ -111,20 +129,18 @@ export function runInvoiceOcr(invoiceId, { fileKey, cacheKey } = {}) {
   });
 }
 
-export function analyzeInvoice(invoiceId, { cacheKey, userId = DEFAULT_USER_ID } = {}) {
+export function analyzeInvoice(invoiceId, { cacheKey } = {}) {
   return apiRequest(`/invoices/${encodeURIComponent(invoiceId)}/analyze`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ cacheKey, userId }),
+    body: JSON.stringify({ cacheKey }),
   });
 }
 
-export function getInvoices(userId = DEFAULT_USER_ID) {
-  const params = new URLSearchParams({ userId });
-  return apiRequest(`/invoices?${params.toString()}`);
+export function getInvoices() {
+  return apiRequest(`/invoices`);
 }
 
-export function getDashboardSummary(userId = DEFAULT_USER_ID) {
-  const params = new URLSearchParams({ userId });
-  return apiRequest(`/dashboard-summary?${params.toString()}`);
+export function getDashboardSummary() {
+  return apiRequest(`/dashboard-summary`);
 }

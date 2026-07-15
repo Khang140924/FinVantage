@@ -105,6 +105,52 @@ PONG
 npm run api:dev
 ```
 
+## 8b. Chay Auth BFF (AWS Cognito) local
+
+Auth chay nhu mot Backend-for-Frontend (BFF) bang Express + openid-client + express-session.
+Server lang nghe port 4000, xu ly OIDC Authorization Code Flow voi Cognito (confidential client).
+
+```bash
+npm run auth:dev
+```
+
+Trinh duyet SPA (Vite, port 5173) se proxy `/auth/*` sang BFF nay (xem `frontend/vite.config.js`).
+
+## 13. Cau hinh AWS Cognito
+
+Tao User Pool tai `ap-southeast-2` (hoac region cua ban) va App Client kieu
+**confidential** (co client secret). Cap nhat `.env` (root) theo `.env.example`:
+
+```text
+COGNITO_ISSUER=https://cognito-idp.ap-southeast-2.amazonaws.com/ap-southeast-2_w5VOUmdXq
+COGNITO_USER_POOL_ID=ap-southeast-2_w5VOUmdXq
+COGNITO_CLIENT_ID=2hs9fmv5n769u1oit0022hisjf
+COGNITO_CLIENT_SECRET=<client secret cua App Client>
+COGNITO_DOMAIN=https://<ten-pool>.auth.ap-southeast-2.amazoncognito.com
+COGNITO_REDIRECT_URI=http://localhost:5173/auth/callback
+COGNITO_LOGOUT_URI=http://localhost:5173/
+SESSION_SECRET=<chuoi ngau nhien>
+```
+
+Trong Cognito App Client, them:
+
+- Allowed Callback URL: `http://localhost:5173/auth/callback`
+- Allowed Sign-out URL: `http://localhost:5173/`
+- OAuth scopes: `openid email profile`
+- Hosted UI: bat va thiet lap domain (`COGNITO_DOMAIN`)
+
+Luong dang nhap: SPA -> `/auth/login` (BFF) -> Cognito Hosted UI -> redirect
+`/auth/callback` (BFF verify, luu session, tra id_token) -> SPA goi `/auth/me`
+de lay token, luu vao localStorage va gui kem header `Authorization: Bearer`
+cho cac API serverless. Backend xac thuc id_token qua JWKS (`src/utils/cognitoAuth.js`).
+
+Neu chi muon chay local ma khong can Cognito that, dat `USE_MOCK_AUTH=true`
+trong `.env` (bo qua xac thuc, tra ve user gia).
+
+Luu y: du lieu hoa don cu co `user_id = 'demo-user'` se khong hien thi voi
+tai khoan Cognito moi (sub khac). Hay seed lai du lieu hoac dung `USE_MOCK_AUTH`.
+
+
 ## 9. Chay frontend local
 
 ```bash

@@ -24,6 +24,9 @@ provider:
     DB_PASSWORD: ${env:DB_PASSWORD, 'postgres'}
     REDIS_URL: ${env:REDIS_URL, 'redis://localhost:6379'}
     USE_MOCK_AI: ${env:USE_MOCK_AI, 'true'}
+    USE_MOCK_AUTH: ${env:USE_MOCK_AUTH, 'false'}
+    COGNITO_USER_POOL_ID: ${env:COGNITO_USER_POOL_ID, 'ap-southeast-2_w5VOUmdXq'}
+    COGNITO_CLIENT_ID: ${env:COGNITO_CLIENT_ID, '2hs9fmv5n769u1oit0022hisjf'}
     AWS_NODEJS_CONNECTION_REUSE_ENABLED: '1'
   iam:
     role:

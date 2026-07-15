@@ -2,7 +2,6 @@ import { AlertCircle, Check, CloudUpload, FileImage, Loader2, UploadCloud, X } f
 import { useMemo, useRef, useState } from "react";
 import {
   ApiError,
-  DEFAULT_USER_ID,
   analyzeInvoice,
   importInvoice,
   isApiConfigured,
@@ -234,7 +233,6 @@ export default function UploadInvoice({ onNavigate, onAnalysisComplete }) {
       currentStage = "analyze";
       const analyzedInvoice = await analyzeInvoice(uploadIdentity.invoiceId, {
         cacheKey: uploadIdentity.cacheKey,
-        userId: DEFAULT_USER_ID,
       });
       const payload = { ...analyzedInvoice, upload: uploadIdentity };
 

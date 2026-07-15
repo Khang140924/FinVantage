@@ -1,16 +1,12 @@
 import { getDashboardSummary, getInvoicesByUser } from '../services/db.service.js';
 import * as response from '../utils/response.js';
 import { logger } from '../utils/logger.js';
-
-const DEFAULT_USER_ID = 'demo-user';
-
-const getUserId = (event = {}) => {
-  const userId = event.queryStringParameters?.userId;
-  return typeof userId === 'string' && userId.trim() ? userId.trim() : DEFAULT_USER_ID;
-};
+import { requireAuth } from '../utils/cognitoAuth.js';
 
 export const listInvoices = async (event = {}) => {
-  const userId = getUserId(event);
+  const auth = await requireAuth(event);
+  if (auth.error) return auth.error;
+  const userId = auth.user.sub;
 
   try {
     logger.info('Fetching invoices for user', { userId });
@@ -27,7 +23,9 @@ export const listInvoices = async (event = {}) => {
 };
 
 export const dashboardSummary = async (event = {}) => {
-  const userId = getUserId(event);
+  const auth = await requireAuth(event);
+  if (auth.error) return auth.error;
+  const userId = auth.user.sub;
 
   try {
     logger.info('Fetching dashboard summary for user', { userId });

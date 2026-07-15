@@ -1,6 +1,7 @@
 import { Bell, Languages, Moon, Search, Sun } from "lucide-react";
 import { useLanguage } from "../i18n/LanguageContext.jsx";
 import { languageOptions } from "../i18n/translations.js";
+import { useAuth } from "../context/AuthContext.jsx";
 
 export default function Topbar({
   pageTitle,
@@ -10,6 +11,15 @@ export default function Topbar({
   onToggleTheme,
 }) {
   const { language, setLanguage, t } = useLanguage();
+  const { user } = useAuth();
+
+  const displayName = user?.name || user?.email || t("topbar.guest");
+  const initials = displayName
+    .split(/[\s@.]+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase())
+    .join("");
 
   return (
     <header className="sticky top-0 z-20 border-b border-slate-200 bg-white/90 px-4 py-4 backdrop-blur dark:border-slate-800 dark:bg-slate-950/90 sm:px-6 lg:px-8">
@@ -71,11 +81,11 @@ export default function Topbar({
           className="hidden items-center gap-3 rounded-lg border border-slate-200 bg-white py-1.5 pl-1.5 pr-3 text-left shadow-sm transition duration-200 hover:border-emerald-200 hover:bg-emerald-50 active:scale-[0.99] dark:border-slate-800 dark:bg-slate-900 dark:hover:border-emerald-700 dark:hover:bg-emerald-950 sm:flex"
         >
           <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-slate-900 text-sm font-bold text-white dark:bg-emerald-600">
-            MA
+            {initials || "U"}
           </span>
           <span>
             <span className="block text-sm font-semibold text-slate-900 dark:text-white">
-              Minh Anh
+              {displayName}
             </span>
             <span className="block text-xs text-slate-500 dark:text-slate-400">{t("topbar.premium")}</span>
           </span>

@@ -2,8 +2,7 @@ import { analyzeInvoiceWithBedrock } from '../services/bedrock.service.js';
 import { getInvoiceFromCache, saveParsedInvoice } from '../services/db.service.js';
 import * as response from '../utils/response.js';
 import { logger } from '../utils/logger.js';
-
-const DEFAULT_USER_ID = 'demo-user';
+import { requireAuth } from '../utils/cognitoAuth.js';
 
 const parseBody = (event) => {
   if (!event?.body) {
@@ -42,6 +41,10 @@ export const handler = async (event = {}) => {
     return response.badRequest('Thiếu invoiceId trong pathParameters.id.');
   }
 
+  const auth = await requireAuth(event);
+  if (auth.error) return auth.error;
+  const userId = auth.user.sub;
+
   let body;
   try {
     body = parseBody(event);
@@ -51,7 +54,6 @@ export const handler = async (event = {}) => {
   }
 
   const cacheKey = body.cacheKey || `ocr:${invoiceId}`;
-  const userId = body.userId || DEFAULT_USER_ID;
 
   try {
     logger.info('Starting invoice analysis flow', { invoiceId, cacheKey, userId });

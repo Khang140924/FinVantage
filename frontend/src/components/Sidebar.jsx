@@ -10,6 +10,7 @@ import {
   WalletCards,
 } from "lucide-react";
 import { useLanguage } from "../i18n/LanguageContext.jsx";
+import { useAuth } from "../context/AuthContext.jsx";
 
 const navItems = [
   { id: "dashboard", labelKey: "nav.dashboard", icon: LayoutDashboard },
@@ -48,6 +49,7 @@ function NavButton({ item, isActive, onNavigate }) {
 
 export default function Sidebar({ activePage, onNavigate }) {
   const { t } = useLanguage();
+  const { logout } = useAuth();
 
   return (
     <>
@@ -99,6 +101,7 @@ export default function Sidebar({ activePage, onNavigate }) {
 
           <button
             type="button"
+            onClick={logout}
             className="mt-5 flex w-full items-center gap-3 rounded-lg px-4 py-3 text-sm font-semibold text-slate-500 transition duration-200 hover:bg-rose-50 hover:text-rose-600 dark:text-slate-400 dark:hover:bg-rose-950/40 dark:hover:text-rose-300"
           >
             <LogOut className="h-5 w-5" />
