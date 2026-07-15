@@ -122,14 +122,14 @@ Tao User Pool tai `ap-southeast-2` (hoac region cua ban) va App Client kieu
 **confidential** (co client secret). Cap nhat `.env` (root) theo `.env.example`:
 
 ```text
-COGNITO_ISSUER=https://cognito-idp.ap-southeast-2.amazonaws.com/ap-southeast-2_w5VOUmdXq
-COGNITO_USER_POOL_ID=ap-southeast-2_w5VOUmdXq
-COGNITO_CLIENT_ID=2hs9fmv5n769u1oit0022hisjf
-COGNITO_CLIENT_SECRET=<client secret cua App Client>
-COGNITO_DOMAIN=https://<ten-pool>.auth.ap-southeast-2.amazoncognito.com
-COGNITO_REDIRECT_URI=http://localhost:5173/auth/callback
-COGNITO_LOGOUT_URI=http://localhost:5173/
-SESSION_SECRET=<chuoi ngau nhien>
+COGNITO_ISSUER
+COGNITO_USER_POOL_ID
+COGNITO_CLIENT_ID
+COGNITO_CLIENT_SECRET
+COGNITO_DOMAIN
+COGNITO_REDIRECT_URI
+COGNITO_LOGOUT_URI
+SESSION_SECRET
 ```
 
 Trong Cognito App Client, them:
