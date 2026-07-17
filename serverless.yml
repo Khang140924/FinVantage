@@ -22,8 +22,14 @@ provider:
     DB_NAME: ${env:DB_NAME, 'finvantage'}
     DB_USER: ${env:DB_USER, 'postgres'}
     DB_PASSWORD: ${env:DB_PASSWORD, 'postgres'}
+    RDS_PROXY_ENDPOINT: ${env:RDS_PROXY_ENDPOINT, env:DB_HOST, 'localhost'}
     REDIS_URL: ${env:REDIS_URL, 'redis://localhost:6379'}
     USE_MOCK_AI: ${env:USE_MOCK_AI, 'true'}
+    USE_MOCK_AUTH: ${env:USE_MOCK_AUTH, 'false'}
+    COGNITO_USER_POOL_ID: ${env:COGNITO_USER_POOL_ID, 'ap-southeast-2_w5VOUmdXq'}
+    COGNITO_CLIENT_ID: ${env:COGNITO_CLIENT_ID, '2hs9fmv5n769u1oit0022hisjf'}
+    PROFILE_AVATAR_BUCKET_NAME: ${env:PROFILE_AVATAR_BUCKET_NAME, env:S3_RAW_BUCKET_NAME, env:S3_BUCKET_NAME, 'finvantage-raw-invoices-dev'}
+    SNS_BUDGET_ALERTS_TOPIC_ARN: ${env:SNS_BUDGET_ALERTS_TOPIC_ARN, ''}
     AWS_NODEJS_CONNECTION_REUSE_ENABLED: '1'
   iam:
     role:
@@ -34,13 +40,23 @@ provider:
             - s3:GetObject
             - s3:PutObject
           Resource:
-            - arn:aws:s3:::${env:S3_RAW_BUCKET_NAME, env:S3_BUCKET_NAME, 'finvantage-raw-invoices-dev'}/*
+            - arn:aws:s3:::${env:S3_RAW_BUCKET_NAME, env:S3_BUCKET_NAME, 'finvantage-raw-invoices-dev'}/uploads/*
+        - Effect: Allow
+          Action:
+            - s3:GetObject
+            - s3:PutObject
+          Resource:
+            - arn:aws:s3:::${env:PROFILE_AVATAR_BUCKET_NAME, env:S3_RAW_BUCKET_NAME, env:S3_BUCKET_NAME, 'finvantage-raw-invoices-dev'}/avatars/*
         # Cho phép gọi API AnalyzeExpense của AWS Textract
         - Effect: Allow
           Action:
             - textract:AnalyzeExpense
           Resource:
             - "*"
+        - Effect: Allow
+          Action:
+            - sns:Publish
+          Resource: ${env:SNS_BUDGET_ALERTS_TOPIC_ARN, '*'}
         # Cho phép gọi AI Bedrock
         - Effect: Allow
           Action:
@@ -95,6 +111,112 @@ functions:
       - http:
           path: invoices
           method: get
+          cors: true
+
+  searchInvoices:
+    handler: src/handlers/invoiceHandler.searchInvoices
+    description: "Tim giao dich va line item theo Cognito sub"
+    events:
+      - http:
+          path: search
+          method: get
+          cors: true
+
+  getInvoice:
+    handler: src/handlers/invoiceHandler.getInvoice
+    events:
+      - http:
+          path: invoices/{id}
+          method: get
+          cors: true
+
+  getInvoiceStatus:
+    handler: src/handlers/invoiceHandler.getInvoiceStatus
+    description: "Lấy trạng thái pipeline hóa đơn theo Cognito sub"
+    events:
+      - http:
+          path: invoices/{id}/status
+          method: get
+          cors: true
+
+  updateInvoice:
+    handler: src/handlers/invoiceHandler.updateInvoice
+    events:
+      - http:
+          path: invoices/{id}
+          method: put
+          cors: true
+
+  deleteInvoice:
+    handler: src/handlers/invoiceHandler.deleteInvoice
+    events:
+      - http:
+          path: invoices/{id}
+          method: delete
+          cors: true
+
+  budgetsApi:
+    handler: src/handlers/budgetHandler.handler
+    events:
+      - http:
+          path: budgets
+          method: get
+          cors: true
+      - http:
+          path: budgets
+          method: post
+          cors: true
+      - http:
+          path: budgets/{id}
+          method: delete
+          cors: true
+
+  profileApi:
+    handler: src/handlers/profileHandler.handler
+    events:
+      - http:
+          path: me
+          method: get
+          cors: true
+      - http:
+          path: me
+          method: put
+          cors: true
+      - http:
+          path: me/preferences
+          method: get
+          cors: true
+      - http:
+          path: me/preferences
+          method: put
+          cors: true
+      - http:
+          path: me/avatar/upload-url
+          method: post
+          cors: true
+
+  notificationsApi:
+    handler: src/handlers/notificationHandler.handler
+    events:
+      - http:
+          path: notifications
+          method: get
+          cors: true
+      - http:
+          path: notifications/unread-count
+          method: get
+          cors: true
+      - http:
+          path: notifications/{id}/read
+          method: put
+          cors: true
+      - http:
+          path: notifications/read-all
+          method: put
+          cors: true
+      - http:
+          path: notifications/{id}
+          method: delete
           cors: true
 
   dashboardSummary:

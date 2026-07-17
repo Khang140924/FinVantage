@@ -5,11 +5,14 @@ CREATE TABLE IF NOT EXISTS invoices (
   user_id VARCHAR(100) NOT NULL DEFAULT 'demo-user',
   store_name VARCHAR(255),
   total_amount NUMERIC(12, 2) DEFAULT 0,
+  currency VARCHAR(3) NOT NULL DEFAULT 'VND',
   category VARCHAR(100),
   ai_advice TEXT,
   raw_text TEXT,
   source_file_key TEXT,
+  line_items JSONB NOT NULL DEFAULT '[]'::jsonb,
   status VARCHAR(50) DEFAULT 'ANALYZED',
+  transaction_date DATE DEFAULT CURRENT_DATE,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -18,6 +21,85 @@ ALTER TABLE invoices
   ALTER COLUMN id TYPE VARCHAR(255) USING id::text,
   ALTER COLUMN id SET DEFAULT gen_random_uuid()::text;
 
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS transaction_date DATE;
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS line_items JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS currency VARCHAR(3) NOT NULL DEFAULT 'VND';
+UPDATE invoices SET currency = 'VND' WHERE currency IS NULL OR currency = '';
+UPDATE invoices SET transaction_date = created_at::date WHERE transaction_date IS NULL;
+ALTER TABLE invoices ALTER COLUMN transaction_date SET DEFAULT CURRENT_DATE;
+
+CREATE TABLE IF NOT EXISTS budgets (
+  id VARCHAR(255) PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  user_id VARCHAR(100) NOT NULL,
+  category VARCHAR(100) NOT NULL,
+  amount NUMERIC(12, 2) NOT NULL CHECK (amount > 0),
+  budget_month DATE NOT NULL DEFAULT date_trunc('month', CURRENT_DATE)::date,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT budgets_user_category_month_key UNIQUE (user_id, category, budget_month)
+);
+
+ALTER TABLE budgets ADD COLUMN IF NOT EXISTS budget_month DATE;
+UPDATE budgets SET budget_month = date_trunc('month', COALESCE(created_at, CURRENT_TIMESTAMP))::date WHERE budget_month IS NULL;
+ALTER TABLE budgets ALTER COLUMN budget_month SET DEFAULT date_trunc('month', CURRENT_DATE)::date;
+ALTER TABLE budgets ALTER COLUMN budget_month SET NOT NULL;
+ALTER TABLE budgets DROP CONSTRAINT IF EXISTS budgets_user_id_category_key;
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'budgets_user_category_month_key') THEN
+    ALTER TABLE budgets ADD CONSTRAINT budgets_user_category_month_key UNIQUE (user_id, category, budget_month);
+  END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS user_profiles (
+  user_id VARCHAR(100) PRIMARY KEY,
+  email VARCHAR(320) NOT NULL,
+  display_name VARCHAR(255),
+  phone VARCHAR(50),
+  avatar_url TEXT,
+  avatar_key TEXT,
+  currency VARCHAR(10) NOT NULL DEFAULT 'VND',
+  default_currency VARCHAR(3) NOT NULL DEFAULT 'VND',
+  timezone VARCHAR(100) NOT NULL DEFAULT 'Asia/Bangkok',
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS avatar_key TEXT;
+ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS default_currency VARCHAR(3) NOT NULL DEFAULT 'VND';
+UPDATE user_profiles SET default_currency = 'VND' WHERE default_currency IS NULL OR default_currency <> 'VND';
+UPDATE user_profiles SET avatar_key = avatar_url WHERE avatar_key IS NULL AND avatar_url LIKE 'avatars/%';
+
+CREATE TABLE IF NOT EXISTS user_preferences (
+  user_id VARCHAR(100) PRIMARY KEY REFERENCES user_profiles(user_id) ON DELETE CASCADE,
+  language VARCHAR(10) NOT NULL DEFAULT 'vi',
+  dark_mode BOOLEAN NOT NULL DEFAULT false,
+  email_alerts BOOLEAN NOT NULL DEFAULT true,
+  budget_guardrails BOOLEAN NOT NULL DEFAULT true,
+  auto_analyze_invoices BOOLEAN NOT NULL DEFAULT true,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS notifications (
+  id VARCHAR(255) PRIMARY KEY DEFAULT gen_random_uuid()::text,
+  user_id VARCHAR(100) NOT NULL,
+  type VARCHAR(100) NOT NULL,
+  title VARCHAR(255) NOT NULL,
+  message TEXT NOT NULL,
+  reference_id VARCHAR(255),
+  is_read BOOLEAN NOT NULL DEFAULT false,
+  dedupe_key VARCHAR(500),
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (user_id, dedupe_key)
+);
+
 CREATE INDEX IF NOT EXISTS idx_invoices_user_id ON invoices(user_id);
 CREATE INDEX IF NOT EXISTS idx_invoices_category ON invoices(category);
 CREATE INDEX IF NOT EXISTS idx_invoices_created_at ON invoices(created_at);
+CREATE INDEX IF NOT EXISTS idx_invoices_transaction_date ON invoices(transaction_date);
+CREATE INDEX IF NOT EXISTS idx_budgets_user_id ON budgets(user_id);
+CREATE INDEX IF NOT EXISTS idx_budgets_month ON budgets(user_id, budget_month);
+CREATE INDEX IF NOT EXISTS idx_user_profiles_email ON user_profiles(email);
+CREATE INDEX IF NOT EXISTS idx_notifications_user_created ON notifications(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_notifications_user_unread ON notifications(user_id, is_read) WHERE is_read = false;

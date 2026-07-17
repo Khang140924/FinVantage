@@ -1,4 +1,4 @@
-import { createContext, useContext, useMemo, useState } from "react";
+import { createContext, useCallback, useContext, useMemo, useState } from "react";
 import { LANGUAGE_STORAGE_KEY, defaultLanguage, translations } from "./translations.js";
 
 const LanguageContext = createContext(null);
@@ -27,7 +27,7 @@ function interpolate(value, params = {}) {
 export function LanguageProvider({ children }) {
   const [language, setLanguageState] = useState(getStoredLanguage);
 
-  function setLanguage(nextLanguage) {
+  const setLanguage = useCallback((nextLanguage) => {
     const safeLanguage = translations[nextLanguage] ? nextLanguage : defaultLanguage;
     setLanguageState(safeLanguage);
 
@@ -36,7 +36,7 @@ export function LanguageProvider({ children }) {
     } catch {
       // Ignore storage failures so the UI remains usable in private browsing modes.
     }
-  }
+  }, []);
 
   const value = useMemo(() => {
     function t(key, params) {
@@ -46,7 +46,7 @@ export function LanguageProvider({ children }) {
     }
 
     return { language, setLanguage, t };
-  }, [language]);
+  }, [language, setLanguage]);
 
   return <LanguageContext.Provider value={value}>{children}</LanguageContext.Provider>;
 }

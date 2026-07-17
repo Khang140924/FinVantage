@@ -1,150 +1,198 @@
 import { extractInvoiceData } from '../services/textract.service.js';
-import { cacheInvoiceData } from '../services/db.service.js';
+import { cacheInvoiceData, createNotification } from '../services/db.service.js';
 import * as response from '../utils/response.js';
 import { logger } from '../utils/logger.js';
 import { buildOcrCacheKey } from '../utils/invoice.js';
-import { normalizeOcrCachePayload } from '../utils/textractExpense.js';
+import {
+  assertValidOcrPayload,
+  normalizeOcrCachePayload,
+  OcrResultError
+} from '../utils/textractExpense.js';
+import { requireAuth } from '../utils/cognitoAuth.js';
 
 const parseBody = (event) => {
-  if (!event?.body) {
-    return {};
-  }
-
-  if (typeof event.body === 'object') {
-    return event.body;
-  }
-
+  if (!event?.body) return {};
+  if (typeof event.body === 'object') return event.body;
   const bodyText = String(event.body).trim();
   return bodyText ? JSON.parse(bodyText) : {};
 };
 
 const getBucketName = () => process.env.S3_RAW_BUCKET_NAME || process.env.S3_BUCKET_NAME || '';
 
-const isAccessDeniedError = (error) => (
-  error?.name === 'AccessDeniedException' ||
-  error?.Code === 'AccessDenied' ||
-  error?.code === 'AccessDenied' ||
-  /access denied/i.test(error?.message || '')
-);
-
-const isMissingS3ObjectError = (error) => (
-  error?.name === 'InvalidS3ObjectException' ||
-  error?.name === 'NoSuchKey' ||
-  error?.Code === 'NoSuchKey' ||
-  error?.$metadata?.httpStatusCode === 404 ||
-  /unable to get object metadata|not found|no such key/i.test(error?.message || '')
-);
-
-const isRedisConnectionError = (error) => (
-  error?.code === 'ECONNREFUSED' ||
-  error?.cause?.code === 'ECONNREFUSED' ||
-  /redis|econnrefused/i.test(error?.message || '')
-);
-
-const isAwsCredentialOrRegionError = (error) => (
-  error?.name === 'CredentialsProviderError' ||
-  error?.name === 'UnrecognizedClientException' ||
-  error?.name === 'InvalidSignatureException' ||
-  error?.name === 'AuthorizationHeaderMalformed' ||
-  error?.Code === 'SignatureDoesNotMatch' ||
-  /credential|region|signature|security token|missing credentials/i.test(error?.message || '')
-);
-
-const buildOcrErrorResponse = (error) => {
-  if (isAccessDeniedError(error)) {
-    return response.sendResponse(403, {
-      error: 'Textract AccessDenied',
-      message: 'Textract AccessDenied: AWS credentials do not have permission to call AnalyzeExpense or read the S3 object.'
-    });
+const classifyOcrError = (error) => {
+  if (error instanceof OcrResultError) {
+    return { statusCode: 422, code: error.code, message: error.message };
   }
-
-  if (isMissingS3ObjectError(error)) {
-    return response.notFound('File khong ton tai trong S3 hoac Textract khong doc duoc object voi fileKey da cung cap.');
+  if (
+    error?.name === 'AccessDeniedException' || error?.Code === 'AccessDenied' ||
+    error?.code === 'AccessDenied' || /access denied/i.test(error?.message || '')
+  ) {
+    return {
+      statusCode: 403,
+      code: 'OCR_ACCESS_DENIED',
+      message: 'Textract không có quyền AnalyzeExpense hoặc không đọc được file trong S3.'
+    };
   }
-
-  if (isRedisConnectionError(error)) {
-    return response.sendResponse(503, {
-      error: 'Redis unavailable',
-      message: 'Redis chua chay. Hay mo Docker Desktop va chay docker start finvantage-redis.'
-    });
+  if (
+    error?.name === 'InvalidS3ObjectException' || error?.name === 'NoSuchKey' ||
+    error?.Code === 'NoSuchKey' || error?.$metadata?.httpStatusCode === 404 ||
+    /unable to get object metadata|not found|no such key/i.test(error?.message || '')
+  ) {
+    return { statusCode: 404, code: 'OCR_S3_OBJECT_NOT_FOUND', message: 'Không tìm thấy file hóa đơn trong S3.' };
   }
-
-  if (isAwsCredentialOrRegionError(error)) {
-    return response.sendResponse(502, {
-      error: 'AWS credentials or region error',
-      message: 'OCR thuc te can AWS S3/Textract va credentials hop le. Hay kiem tra AWS_REGION, AWS_REGION_NAME va credentials local.'
-    });
+  if (
+    error?.code === 'ECONNREFUSED' || error?.cause?.code === 'ECONNREFUSED' ||
+    /redis|econnrefused/i.test(error?.message || '')
+  ) {
+    return { statusCode: 503, code: 'OCR_REDIS_UNAVAILABLE', message: 'Redis chưa sẵn sàng để lưu trạng thái OCR.' };
   }
-
-  return response.serverError(`Khong the chay OCR Textract: ${error.message || 'Unknown error'}`);
+  if (
+    error?.name === 'CredentialsProviderError' || error?.name === 'UnrecognizedClientException' ||
+    error?.name === 'InvalidSignatureException' || error?.name === 'AuthorizationHeaderMalformed' ||
+    error?.Code === 'SignatureDoesNotMatch' ||
+    /credential|region|signature|security token|missing credentials/i.test(error?.message || '')
+  ) {
+    return {
+      statusCode: 502,
+      code: 'OCR_AWS_CONFIGURATION_ERROR',
+      message: 'Không thể gọi S3/Textract. Hãy kiểm tra region và AWS credentials của backend.'
+    };
+  }
+  return {
+    statusCode: 500,
+    code: 'OCR_PROCESSING_FAILED',
+    message: `Không thể xử lý OCR: ${error?.message || 'Unknown error'}`
+  };
 };
+
+const statusPayload = (invoiceId, fileKey, userId, status, extra = {}) => ({
+  invoiceId,
+  userId,
+  fileKey,
+  sourceFileKey: fileKey,
+  source_file_key: fileKey,
+  status,
+  updatedAt: new Date().toISOString(),
+  ...extra
+});
 
 export const handler = async (event = {}) => {
   const invoiceId = event.pathParameters?.id;
+  const auth = await requireAuth(event);
+  if (auth.error) return auth.error;
+  const userId = auth.user.sub;
 
-  if (!invoiceId) {
-    logger.warn('OCR API request is missing invoiceId path parameter', {
-      pathParameters: event.pathParameters
-    });
-    return response.badRequest('Thieu invoiceId trong pathParameters.id.');
-  }
+  if (!invoiceId) return response.badRequest('Thiếu invoiceId trong pathParameters.id.');
 
   let body;
   try {
     body = parseBody(event);
   } catch (parseError) {
-    logger.error('Failed to parse OCR API request body JSON', parseError, { invoiceId });
-    return response.badRequest('Request body phai la JSON hop le.');
+    logger.error('Failed to parse OCR request JSON', parseError, { invoiceId });
+    return response.badRequest('Request body phải là JSON hợp lệ.');
   }
 
   const fileKey = body.fileKey || body.sourceFileKey || body.source_file_key;
   const cacheKey = body.cacheKey || buildOcrCacheKey(invoiceId);
   const bucketName = getBucketName();
-
-  if (!fileKey) {
-    return response.badRequest('Thieu fileKey. Hay truyen fileKey tu POST /invoices/import vao OCR API.');
+  if (!fileKey) return response.badRequest('Thiếu fileKey từ POST /invoices/import.');
+  if (!bucketName) return response.badRequest('Backend chưa cấu hình S3 bucket cho hóa đơn.');
+  const safeUserId = String(userId).replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 100);
+  if (!fileKey.startsWith(`uploads/${safeUserId}/`)) {
+    return response.sendResponse(403, {
+      error: 'Invoice file ownership mismatch',
+      code: 'OCR_FILE_OWNERSHIP_MISMATCH',
+      message: 'Người dùng chỉ có thể OCR file hóa đơn do chính tài khoản này tải lên.'
+    });
   }
 
-  if (!bucketName) {
-    return response.badRequest('Thieu S3 bucket. Hay cau hinh S3_RAW_BUCKET_NAME hoac S3_BUCKET_NAME trong backend .env.');
-  }
+  const cacheStatus = async (status, extra = {}) => {
+    await cacheInvoiceData(cacheKey, statusPayload(invoiceId, fileKey, userId, status, extra), 3600);
+  };
+
+  const notifyFailure = async ({ code, message }) => {
+    try {
+      await createNotification({
+        userId,
+        type: 'INVOICE_FAILED',
+        title: 'Xử lý hóa đơn thất bại',
+        message,
+        referenceId: invoiceId,
+        dedupeKey: `invoice:${invoiceId}:failed:ocr:${code}`
+      });
+    } catch (notificationError) {
+      logger.warn('Could not persist OCR failure notification', {
+        invoiceId,
+        fileKey,
+        error: notificationError.message
+      });
+    }
+  };
 
   try {
-    logger.info('Starting OCR API Textract flow', {
-      invoiceId,
-      cacheKey,
-      fileKey,
-      bucketConfigured: Boolean(bucketName)
-    });
+    logger.info('Invoice upload confirmed; starting OCR', { invoiceId, fileKey, status: 'UPLOADED' });
+    await cacheStatus('UPLOADED', { progress: 25, uploadConfirmed: true });
+    await cacheStatus('OCR_PROCESSING', { progress: 35, uploadConfirmed: true });
 
     const expenseDocuments = await extractInvoiceData(bucketName, fileKey);
     const cachedInvoice = normalizeOcrCachePayload({
       invoiceId,
       fileKey,
-      expenseDocuments
+      userId,
+      expenseDocuments,
+      status: 'OCR_PROCESSING'
     });
 
+    logger.info('Textract result normalized', {
+      invoiceId,
+      fileKey,
+      expenseDocumentsCount: expenseDocuments.length,
+      rawTextLength: cachedInvoice.rawText.length,
+      vendorFound: !cachedInvoice.warning,
+      totalFound: Number.isFinite(cachedInvoice.totalAmount),
+      lineItemsCount: cachedInvoice.lineItems.length
+    });
+
+    assertValidOcrPayload(cachedInvoice);
     await cacheInvoiceData(cacheKey, cachedInvoice, 3600);
 
-    logger.info('OCR API Textract flow completed', {
-      invoiceId,
-      cacheKey,
-      fileKey,
-      documentsCount: expenseDocuments.length,
-      rawTextLength: cachedInvoice.rawText.length
-    });
-
     return response.success({
-      message: 'OCR Textract thanh cong va da luu rawText vao Redis cache.',
+      message: 'Textract đã đọc hóa đơn thành công.',
       invoiceId,
       cacheKey,
       fileKey,
-      rawTextPreview: cachedInvoice.rawText.slice(0, 500),
+      status: cachedInvoice.status,
+      progress: 50,
+      warning: cachedInvoice.warning,
+      vendor: cachedInvoice.storeName,
+      totalAmount: cachedInvoice.totalAmount,
+      transactionDate: cachedInvoice.transactionDate,
+      lineItems: cachedInvoice.lineItems,
       rawTextLength: cachedInvoice.rawText.length,
       source: 'aws-textract'
     });
   } catch (error) {
-    logger.error('OCR API Textract flow failed', error, { invoiceId, cacheKey, fileKey });
-    return buildOcrErrorResponse(error);
+    const details = classifyOcrError(error);
+    logger.error('Invoice OCR failed', error, {
+      invoiceId,
+      fileKey,
+      status: 'OCR_FAILED',
+      failureCode: details.code
+    });
+
+    try {
+      await cacheStatus('OCR_FAILED', { progress: 50, errorCode: details.code, errorMessage: details.message, uploadConfirmed: true });
+    } catch (cacheError) {
+      logger.warn('Could not cache OCR_FAILED status', { invoiceId, fileKey, error: cacheError.message });
+    }
+    await notifyFailure(details);
+
+    return response.sendResponse(details.statusCode, {
+      error: 'Invoice OCR failed',
+      code: details.code,
+      message: details.message,
+      invoiceId,
+      status: 'OCR_FAILED'
+    });
   }
 };

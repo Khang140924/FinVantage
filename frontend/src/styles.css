@@ -5,6 +5,11 @@
 @layer base {
   html {
     scroll-behavior: smooth;
+    color-scheme: light;
+  }
+
+  html.dark {
+    color-scheme: dark;
   }
 
   body {
@@ -14,6 +19,30 @@
   * {
     scrollbar-width: thin;
     scrollbar-color: #cbd5e1 transparent;
+  }
+
+  input,
+  select,
+  textarea {
+    @apply text-slate-900 placeholder:text-slate-400 dark:text-slate-100 dark:placeholder:text-slate-500;
+  }
+
+  select option {
+    background-color: #ffffff;
+    color: #0f172a;
+  }
+
+  select option:disabled {
+    color: #94a3b8;
+  }
+
+  .dark select option {
+    background-color: #0f172a;
+    color: #f1f5f9;
+  }
+
+  .dark select option:disabled {
+    color: #64748b;
   }
 }
 
@@ -40,6 +69,10 @@
 
   .input-shell {
     @apply flex items-center gap-3 rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm shadow-sm transition duration-200 focus-within:border-emerald-400 focus-within:ring-4 focus-within:ring-emerald-100 dark:border-slate-800 dark:bg-slate-900 dark:focus-within:ring-emerald-950;
+  }
+
+  .form-control {
+    @apply w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-slate-900 outline-none transition focus:border-emerald-500 focus:ring-4 focus:ring-emerald-100 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:focus:border-emerald-500 dark:focus:ring-emerald-950 dark:disabled:bg-slate-800 dark:disabled:text-slate-500;
   }
 
   .table-row {

@@ -1,36 +1,35 @@
-import { TextractClient, AnalyzeExpenseCommand } from '@aws-sdk/client-textract';
+import { AnalyzeExpenseCommand, TextractClient } from '@aws-sdk/client-textract';
+import { logger } from '../utils/logger.js';
 
-// Khởi tạo Textract Client cho các tác vụ trích xuất dữ liệu tài liệu (OCR)
 export const textractClient = new TextractClient({
   region: process.env.AWS_REGION || process.env.AWS_REGION_NAME || 'ap-southeast-1'
 });
 
 /**
- * Trích xuất dữ liệu tài chính từ hóa đơn lưu trữ trên S3 bằng AWS Textract AnalyzeExpense API
- * @param {string} bucketName - Tên ngăn chứa S3 (S3 Bucket Name)
- * @param {string} fileKey - Đường dẫn/khóa tệp tin trên S3 (S3 File Key)
- * @returns {Promise<Array>} - Trả về mảng các tài liệu hóa đơn đã được phân tích (ExpenseDocuments)
+ * Runs Textract AnalyzeExpense against a private S3 invoice object.
+ * Only the object key is logged; credentials and signed URLs are never logged.
  */
 export const extractInvoiceData = async (bucketName, fileKey) => {
-  try {
-    // Khởi tạo command AnalyzeExpenseCommand với vị trí tệp tin trên S3
-    const command = new AnalyzeExpenseCommand({
-      Document: {
-        S3Object: {
-          Bucket: bucketName,
-          Name: fileKey
-        }
+  const command = new AnalyzeExpenseCommand({
+    Document: {
+      S3Object: {
+        Bucket: bucketName,
+        Name: fileKey
       }
+    }
+  });
+
+  try {
+    logger.info('Calling Textract AnalyzeExpense', { fileKey });
+    const textractResponse = await textractClient.send(command);
+    const expenseDocuments = textractResponse.ExpenseDocuments || [];
+    logger.info('Textract AnalyzeExpense returned', {
+      fileKey,
+      expenseDocumentsCount: expenseDocuments.length
     });
-
-    // Thực thi lệnh và nhận phản hồi từ AWS Textract
-    const response = await textractClient.send(command);
-
-    // Trả về dữ liệu hóa đơn trích xuất được (ExpenseDocuments)
-    return response.ExpenseDocuments || [];
+    return expenseDocuments;
   } catch (error) {
-    console.error(`Lỗi khi trích xuất dữ liệu hóa đơn từ S3 (Bucket: ${bucketName}, Key: ${fileKey}):`, error);
+    logger.error('Textract AnalyzeExpense failed', error, { fileKey });
     throw error;
   }
 };
-

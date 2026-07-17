@@ -16,7 +16,9 @@
   "license": "ISC",
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.609.0",
+    "@aws-sdk/client-cognito-identity-provider": "^3.1088.0",
     "@aws-sdk/client-s3": "^3.609.0",
+    "@aws-sdk/client-sns": "^3.1088.0",
     "@aws-sdk/client-textract": "^3.609.0",
     "@aws-sdk/s3-request-presigner": "^3.1080.0",
     "dotenv": "^16.4.5",

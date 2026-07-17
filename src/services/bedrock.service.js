@@ -2,43 +2,30 @@ import { BedrockRuntimeClient, InvokeModelCommand } from '@aws-sdk/client-bedroc
 
 const DEFAULT_MODEL_ID = 'anthropic.claude-3-haiku-20240307-v1:0';
 const DEFAULT_REGION = 'ap-southeast-1';
-const VALID_CATEGORIES = [
+export const VALID_CATEGORIES = [
   'Ăn uống',
   'Mua sắm',
   'Di chuyển',
   'Giải trí',
-  'Hóa đơn tiện ích',
-  'Y tế',
+  'Hóa đơn',
+  'Sức khỏe',
   'Giáo dục',
   'Khác'
 ];
 
 const getBedrockRegion = () => (
-  process.env.AWS_REGION ||
-  process.env.AWS_REGION_NAME ||
-  DEFAULT_REGION
+  process.env.AWS_REGION || process.env.AWS_REGION_NAME || DEFAULT_REGION
 );
 
-const toRawText = (rawText) => {
-  if (typeof rawText === 'string') {
-    return rawText;
-  }
+const toRawText = (rawText) => (
+  typeof rawText === 'string' ? rawText : JSON.stringify(rawText ?? '', null, 2)
+);
 
-  return JSON.stringify(rawText ?? '', null, 2);
-};
-
-export const bedrockClient = new BedrockRuntimeClient({
-  region: getBedrockRegion()
-});
+export const bedrockClient = new BedrockRuntimeClient({ region: getBedrockRegion() });
 
 export const safeParseJson = (text) => {
-  if (!text) {
-    return null;
-  }
-
-  if (typeof text === 'object') {
-    return text;
-  }
+  if (!text) return null;
+  if (typeof text === 'object') return text;
 
   const raw = String(text).trim();
   const candidates = [
@@ -46,121 +33,105 @@ export const safeParseJson = (text) => {
     raw.replace(/^```json\s*/i, '').replace(/\s*```$/i, '').trim(),
     raw.replace(/^```\s*/i, '').replace(/\s*```$/i, '').trim()
   ];
-
   const firstBrace = raw.indexOf('{');
   const lastBrace = raw.lastIndexOf('}');
-  if (firstBrace !== -1 && lastBrace > firstBrace) {
-    candidates.push(raw.slice(firstBrace, lastBrace + 1));
-  }
+  if (firstBrace !== -1 && lastBrace > firstBrace) candidates.push(raw.slice(firstBrace, lastBrace + 1));
 
   for (const candidate of candidates) {
     try {
       return JSON.parse(candidate);
     } catch {
-      // Try the next candidate shape.
+      // Try the next shape returned by the model.
     }
   }
-
   return null;
 };
 
 export const normalizeInvoiceResult = (data = {}) => {
-  const storeName = data.store_name || data.StoreName || data.VendorName;
-  const totalAmount = Number(data.total_amount ?? data.TotalAmount ?? 0);
   const category = VALID_CATEGORIES.includes(data.category) ? data.category : 'Khác';
   const advice = data.ai_advice || data.AIAdvice || data.FinancialAdvice;
-
   return {
-    store_name: typeof storeName === 'string' && storeName.trim()
-      ? storeName.trim()
-      : 'Không xác định',
-    total_amount: Number.isFinite(totalAmount) ? totalAmount : 0,
     category,
     ai_advice: typeof advice === 'string' && advice.trim()
       ? advice.trim()
-      : 'Hãy ghi lại khoản chi này và so sánh với ngân sách tháng để kiểm soát chi tiêu cá nhân tốt hơn.'
+      : 'Hãy theo dõi khoản chi này trong ngân sách tháng để kiểm soát chi tiêu tốt hơn.'
   };
 };
 
-const buildPrompt = (rawText) => `Bạn là trợ lý AI chuyên phân tích hóa đơn cho quản lý chi tiêu cá nhân.
+const inferMockCategory = (rawText) => {
+  const text = toRawText(rawText).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
+  const rules = [
+    ['Ăn uống', /PHUC LONG|COFFEE|CAFE|TEA|JUICE|BROWNIE|RESTAURANT|FOOD|BANH|COM|PHO/],
+    ['Di chuyển', /TAXI|GRAB|BUS|PARKING|XANG|PETROL|FUEL|TRANSPORT/],
+    ['Mua sắm', /SUPERMARKET|SHOP|STORE|MART|MARKET|CLOTHING/],
+    ['Giải trí', /CINEMA|MOVIE|GAME|KARAOKE|ENTERTAINMENT/],
+    ['Hóa đơn', /ELECTRIC|WATER|INTERNET|UTILITY|BILL/],
+    ['Sức khỏe', /HOSPITAL|PHARMACY|CLINIC|MEDICINE/],
+    ['Giáo dục', /SCHOOL|UNIVERSITY|TUITION|COURSE|BOOK/]
+  ];
+  return rules.find(([, pattern]) => pattern.test(text))?.[0] || 'Khác';
+};
 
-Dữ liệu hóa đơn:
+const buildPrompt = (rawText) => `Bạn là trợ lý AI phân loại hóa đơn cho quản lý chi tiêu cá nhân.
+
+Dữ liệu OCR thật từ Amazon Textract:
 ${toRawText(rawText)}
 
-Hãy trích xuất thông tin và trả về duy nhất một object JSON hợp lệ, không markdown, không giải thích ngoài JSON.
-
-Schema bắt buộc:
+Chỉ trả về một object JSON hợp lệ, không markdown:
 {
-  "store_name": "string",
-  "total_amount": number,
   "category": "string",
   "ai_advice": "string"
 }
 
 Quy tắc:
-- "category" chỉ được chọn một trong: ${VALID_CATEGORIES.join(', ')}.
-- "ai_advice" phải bằng tiếng Việt, tập trung vào quản lý chi tiêu cá nhân, tiết kiệm và kiểm soát ngân sách.
-- Không đưa lời khuyên bảo hành, pháp lý, y tế hoặc thông tin không liên quan.
-- Nếu không xác định được tên cửa hàng, dùng "Không xác định".
-- Nếu không xác định được tổng tiền, dùng 0.
-- Nếu không chắc category, dùng "Khác".`;
+- category chỉ được chọn một trong: ${VALID_CATEGORIES.join(', ')}.
+- ai_advice bằng tiếng Việt và tập trung vào quản lý chi tiêu.
+- Không trả về hoặc suy đoán store_name, total_amount, transaction_date hay line_items; các trường đó do Textract quyết định.`;
 
-export const analyzeInvoiceWithBedrock = async (rawText) => {
+export const analyzeInvoiceWithBedrock = async (rawText, context = {}) => {
+  if (!String(toRawText(rawText)).trim()) throw new Error('OCR raw_text is required before AI analysis.');
+
   if (process.env.USE_MOCK_AI === 'true') {
+    const category = inferMockCategory(rawText);
+    const amount = Number(context.totalAmount);
+    const amountText = Number.isFinite(amount) && amount > 0
+      ? `${amount.toLocaleString('vi-VN')} VNĐ `
+      : '';
     return normalizeInvoiceResult({
-      store_name: 'Mock Store',
-      total_amount: 125000,
-      category: 'Khác',
-      ai_advice: 'Đây là kết quả mock để kiểm thử local. Hãy theo dõi khoản chi này trong ngân sách tháng và cân nhắc cắt giảm nếu vượt hạn mức.'
+      category,
+      ai_advice: `Khoản chi ${amountText}được xếp vào danh mục ${category}. Bạn có thể đặt ngân sách ${category.toLowerCase()} hàng tháng để theo dõi chi tiêu.`
     });
   }
 
-  const modelId = process.env.BEDROCK_MODEL_ID || DEFAULT_MODEL_ID;
-  const payload = {
-    anthropic_version: 'bedrock-2023-05-31',
-    max_tokens: 800,
-    temperature: 0,
-    messages: [
-      {
-        role: 'user',
-        content: [
-          {
-            type: 'text',
-            text: buildPrompt(rawText)
-          }
-        ]
-      }
-    ]
-  };
-
   const command = new InvokeModelCommand({
-    modelId,
+    modelId: process.env.BEDROCK_MODEL_ID || DEFAULT_MODEL_ID,
     contentType: 'application/json',
     accept: 'application/json',
-    body: JSON.stringify(payload)
+    body: JSON.stringify({
+      anthropic_version: 'bedrock-2023-05-31',
+      max_tokens: 500,
+      temperature: 0,
+      messages: [{ role: 'user', content: [{ type: 'text', text: buildPrompt(rawText) }] }]
+    })
   });
 
   const response = await bedrockClient.send(command);
   const responseBody = JSON.parse(new TextDecoder().decode(response.body));
-  const aiText = responseBody?.content?.[0]?.text;
-  const parsedResult = safeParseJson(aiText);
-
-  if (!parsedResult) {
-    throw new Error('Amazon Bedrock response is not valid invoice JSON.');
-  }
-
+  const parsedResult = safeParseJson(responseBody?.content?.[0]?.text);
+  if (!parsedResult) throw new Error('Amazon Bedrock response is not valid invoice JSON.');
   return normalizeInvoiceResult(parsedResult);
 };
 
-// Backward-compatible wrapper for the existing analysis handler.
+// Backward-compatible wrapper. Structured financial fields intentionally stay
+// null because they must come from Textract, never from AI.
 export const analyzeInvoiceWithAI = async (rawText) => {
   const result = await analyzeInvoiceWithBedrock(rawText);
-
   return {
-    VendorName: result.store_name,
-    TotalAmount: result.total_amount,
+    VendorName: null,
+    TotalAmount: null,
     TaxAmount: null,
     Date: null,
+    category: result.category,
     FinancialAdvice: result.ai_advice
   };
 };

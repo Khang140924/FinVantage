@@ -31,7 +31,7 @@ export const handler = async (event) => {
 
     // Cập nhật trạng thái hóa đơn thành PAID (Đã thanh toán) trong PostgreSQL
     logger.info(`Đang cập nhật trạng thái thanh toán hóa đơn [ID: ${invoiceId}] thành PAID trong database`);
-    const updatedInvoice = await updateInvoicePaymentStatus(invoiceId, 'PAID');
+    const updatedInvoice = await updateInvoicePaymentStatus(invoiceId, 'PAID', auth.user.sub);
 
     // Sinh mã giao dịch giả lập (Mock Transaction ID)
     const transactionId = `tx_pay_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`;

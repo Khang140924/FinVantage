@@ -1,5 +1,9 @@
 export const sanitizeInvoiceId = (objectKey) => {
   const normalizedKey = String(objectKey || '');
+  const stableUploadMatch = normalizedKey.match(/^uploads\/([a-zA-Z0-9_-]+)\/([a-f0-9]{64})_/i);
+  if (stableUploadMatch) {
+    return `invoice-${stableUploadMatch[1].slice(0, 100)}-${stableUploadMatch[2].toLowerCase()}`;
+  }
   const withoutUploadsPrefix = normalizedKey.replace(/^uploads\/+/i, '');
   const withoutExtension = withoutUploadsPrefix.replace(/\.[^/.]+$/, '');
   const sanitized = withoutExtension

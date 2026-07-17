@@ -1,4 +1,5 @@
 import { generateUploadUrl } from '../services/s3.service.js';
+import { cacheInvoiceData, getInvoiceById, getInvoiceFromCache } from '../services/db.service.js';
 import * as response from '../utils/response.js';
 import { logger } from '../utils/logger.js';
 
@@ -22,22 +23,74 @@ export const handler = async (event) => {
       return response.badRequest('Yêu cầu thiếu tham số bắt buộc: fileName hoặc contentType.');
     }
 
-    const { fileName, contentType } = body;
+    const { fileName, contentType, contentSha256 } = body;
+
+    if (contentSha256 && !/^[a-f0-9]{64}$/i.test(contentSha256)) {
+      return response.badRequest('contentSha256 phải là chuỗi SHA-256 gồm 64 ký tự hexadecimal.');
+    }
 
     // Sinh ra presigned URL
     logger.info(`Đang sinh presigned URL cho tệp: ${fileName}, kiểu: ${contentType}`);
-    const uploadData = await generateUploadUrl(fileName, contentType);
+    const uploadData = await generateUploadUrl(fileName, contentType, {
+      userId: auth.user.sub,
+      contentSha256
+    });
+
+    const existingInvoice = await getInvoiceById(uploadData.invoiceId, auth.user.sub);
+    if (existingInvoice?.status === 'ANALYZED' || existingInvoice?.status === 'PAID') {
+      return response.success({
+        message: 'Hóa đơn này đã được phân tích trước đó.',
+        ...uploadData,
+        status: 'ANALYZED',
+        progress: 100,
+        existing: true,
+        uploadRequired: false
+      });
+    }
+
+    const cachedInvoice = await getInvoiceFromCache(uploadData.cacheKey);
+    if (cachedInvoice && String(cachedInvoice.userId || auth.user.sub) === String(auth.user.sub)) {
+      const uploadRequired = cachedInvoice.status === 'UPLOADED' && !cachedInvoice.uploadConfirmed;
+      return response.success({
+        message: 'Tiếp tục trạng thái xử lý của hóa đơn đã nhập.',
+        ...uploadData,
+        status: cachedInvoice.status || 'UPLOADED',
+        progress: Number(cachedInvoice.progress) || 0,
+        warning: cachedInvoice.warning || null,
+        error: cachedInvoice.errorCode ? { code: cachedInvoice.errorCode, message: cachedInvoice.errorMessage } : null,
+        existing: true,
+        uploadRequired
+      });
+    }
+
+    await cacheInvoiceData(uploadData.cacheKey, {
+      invoiceId: uploadData.invoiceId,
+      userId: auth.user.sub,
+      fileKey: uploadData.fileKey,
+      sourceFileKey: uploadData.fileKey,
+      source_file_key: uploadData.fileKey,
+      status: 'UPLOADED',
+      progress: 0,
+      uploadConfirmed: false,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    }, 3600);
 
     logger.info('Sinh presigned URL thành công', {
       fileKey: uploadData.fileKey,
       invoiceId: uploadData.invoiceId,
-      cacheKey: uploadData.cacheKey
+      cacheKey: uploadData.cacheKey,
+      userId: auth.user.sub
     });
 
     // Phản hồi thành công với uploadUrl, fileKey, invoiceId và cacheKey
     return response.success({
       message: 'Sinh đường dẫn tải lên (upload presigned URL) thành công!',
-      ...uploadData
+      ...uploadData,
+      status: 'UPLOADED',
+      progress: 0,
+      existing: false,
+      uploadRequired: true
     });
   } catch (error) {
     logger.error('Lỗi nghiêm trọng khi sinh presigned URL để nhập hóa đơn', error);
