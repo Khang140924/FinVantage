@@ -1,8 +1,9 @@
-import { AlertCircle, Check, CloudUpload, FileImage, Loader2, UploadCloud, X } from "lucide-react";
-import { useMemo, useRef, useState } from "react";
+import { AlertCircle, Check, CloudUpload, FileImage, Loader2, RefreshCw, UploadCloud, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ApiError,
   analyzeInvoice,
+  getInvoiceStatus,
   importInvoice,
   isApiConfigured,
   runInvoiceOcr,
@@ -26,6 +27,30 @@ const supportedMimeTypes = new Set([
   "image/jpg",
   "image/png",
 ]);
+const pollIntervalMs = 1500;
+const maxPollAttempts = 80;
+const terminalFailureStatuses = new Set(["OCR_FAILED", "ANALYSIS_FAILED"]);
+
+function waitForPoll(signal) {
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(resolve, pollIntervalMs);
+    signal?.addEventListener("abort", () => {
+      window.clearTimeout(timer);
+      reject(new DOMException("Polling cancelled", "AbortError"));
+    }, { once: true });
+  });
+}
+
+function isRecoverableRequestError(error) {
+  return ["REQUEST_TIMEOUT", "NETWORK_ERROR"].includes(error?.code);
+}
+
+function pipelineFailure(statusData) {
+  return new ApiError(statusData?.error?.message || "Không thể xử lý hóa đơn.", {
+    code: statusData?.error?.code || statusData?.status || "PIPELINE_FAILED",
+    data: { ...statusData, code: statusData?.error?.code, message: statusData?.error?.message },
+  });
+}
 
 function formatFileSize(size) {
   if (!Number.isFinite(size)) return "";
@@ -61,6 +86,7 @@ function getUploadIdentity(data = {}) {
 
 function getDisplayError(error, stage, t) {
   const backendMessage = getBackendMessage(error);
+  const backendCode = error?.data?.code || error?.code;
 
   if (error?.code === "MISSING_API_BASE_URL") {
     return t("upload.errors.apiBaseMissing");
@@ -68,6 +94,10 @@ function getDisplayError(error, stage, t) {
 
   if (error?.code === "NETWORK_ERROR") {
     return `${t("upload.errors.network")} ${t("upload.errors.backendUnavailable")}`;
+  }
+
+  if (error?.code === "REQUEST_TIMEOUT" || error?.code === "PIPELINE_POLL_TIMEOUT") {
+    return t("upload.errors.pollTimeout");
   }
 
   if (stage === "upload" || error?.code === "S3_NETWORK_ERROR" || error?.code === "S3_UPLOAD_FAILED") {
@@ -79,6 +109,10 @@ function getDisplayError(error, stage, t) {
   }
 
   if (stage === "ocr") {
+    if (["OCR_EMPTY_RESULT", "OCR_TOTAL_NOT_FOUND"].includes(backendCode)) {
+      return `${backendCode}: ${backendMessage || t("upload.errors.ocrFailed")}`;
+    }
+
     if (/redis/i.test(backendMessage)) {
       return t("upload.errors.redisUnavailable");
     }
@@ -122,23 +156,99 @@ function sanitizeAnalysisPayload(payload) {
 export default function UploadInvoice({ onNavigate, onAnalysisComplete }) {
   const { t } = useLanguage();
   const inputRef = useRef(null);
+  const pollingControllerRef = useRef(null);
   const [selectedFile, setSelectedFile] = useState(null);
   const [isDragging, setIsDragging] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [stepIndex, setStepIndex] = useState(-1);
   const [error, setError] = useState(null);
+  const [warning, setWarning] = useState(null);
+  const [pipelineStatus, setPipelineStatus] = useState(null);
   const [uploadData, setUploadData] = useState(null);
   const [analysisData, setAnalysisData] = useState(null);
 
   const steps = useMemo(() => stepKeys.map((key) => t(key)), [t]);
-  const isComplete = Boolean(analysisData) && !isAnalyzing;
+  const isComplete = pipelineStatus?.status === "ANALYZED" && Boolean(analysisData) && !isAnalyzing;
   const canClear = Boolean(selectedFile || error || uploadData || analysisData || stepIndex >= 0) && !isAnalyzing;
 
   const progress = useMemo(() => {
+    if (Number.isFinite(Number(pipelineStatus?.progress))) return Number(pipelineStatus.progress);
     if (isComplete) return 100;
     if (stepIndex < 0) return 0;
     return Math.round(((stepIndex + 1) / steps.length) * 100);
-  }, [isComplete, stepIndex, steps.length]);
+  }, [isComplete, pipelineStatus?.progress, stepIndex, steps.length]);
+
+  useEffect(() => () => pollingControllerRef.current?.abort(), []);
+
+  function applyPipelineStatus(statusData = {}) {
+    setPipelineStatus(statusData);
+    if (statusData.warning) setWarning(statusData.warning);
+    const status = statusData.status;
+    const statusProgress = Number(statusData.progress) || 0;
+    if (status === "ANALYZED") setStepIndex(3);
+    else if (status === "ANALYZING") setStepIndex(2);
+    else if (status === "OCR_PROCESSING") setStepIndex(statusProgress >= 50 ? 2 : 1);
+    else if (status === "OCR_FAILED") setStepIndex(1);
+    else if (status === "ANALYSIS_FAILED") setStepIndex(2);
+    else if (status === "UPLOADED") setStepIndex(1);
+  }
+
+  async function pollUntil(invoiceId, ready, signal) {
+    let lastPollError = null;
+    for (let attempt = 0; attempt < maxPollAttempts; attempt += 1) {
+      await waitForPoll(signal);
+      try {
+        const statusData = await getInvoiceStatus(invoiceId, { signal });
+        lastPollError = null;
+        applyPipelineStatus(statusData);
+        if (terminalFailureStatuses.has(statusData.status)) throw pipelineFailure(statusData);
+        if (ready(statusData)) return statusData;
+      } catch (pollError) {
+        if (pollError?.name === "AbortError") throw pollError;
+        if (terminalFailureStatuses.has(pollError?.data?.status)) throw pollError;
+        lastPollError = pollError;
+      }
+    }
+    throw new ApiError(lastPollError?.message || t("upload.errors.pollTimeout"), {
+      code: "PIPELINE_POLL_TIMEOUT",
+      data: lastPollError?.data,
+    });
+  }
+
+  async function runTrackedStage(invoiceId, trigger, ready, signal) {
+    let triggerSettled = false;
+    let triggerResult = null;
+    let triggerError = null;
+    trigger()
+      .then((result) => { triggerSettled = true; triggerResult = result; })
+      .catch((currentError) => { triggerSettled = true; triggerError = currentError; });
+
+    for (let attempt = 0; attempt < maxPollAttempts; attempt += 1) {
+      if (triggerSettled && !triggerError) {
+        applyPipelineStatus(triggerResult || {});
+        return triggerResult;
+      }
+      if (triggerSettled && triggerError && !isRecoverableRequestError(triggerError)) throw triggerError;
+
+      await waitForPoll(signal);
+      let statusData;
+      try {
+        statusData = await getInvoiceStatus(invoiceId, { signal });
+        applyPipelineStatus(statusData);
+      } catch (pollError) {
+        if (pollError?.name === "AbortError") throw pollError;
+        if (triggerSettled && triggerError && attempt >= 2) throw triggerError;
+        continue;
+      }
+
+      if (terminalFailureStatuses.has(statusData.status)) throw pipelineFailure(statusData);
+      if (ready(statusData)) return statusData;
+    }
+    throw new ApiError(triggerError?.message || t("upload.errors.pollTimeout"), {
+      code: "PIPELINE_POLL_TIMEOUT",
+      data: triggerError?.data,
+    });
+  }
 
   function resetFileInput() {
     if (inputRef.current) {
@@ -147,12 +257,15 @@ export default function UploadInvoice({ onNavigate, onAnalysisComplete }) {
   }
 
   function resetWorkflowState({ keepSelectedFile = false } = {}) {
+    pollingControllerRef.current?.abort();
     if (!keepSelectedFile) {
       setSelectedFile(null);
     }
 
     setStepIndex(-1);
     setError(null);
+    setWarning(null);
+    setPipelineStatus(null);
     setUploadData(null);
     setAnalysisData(null);
   }
@@ -200,7 +313,13 @@ export default function UploadInvoice({ onNavigate, onAnalysisComplete }) {
     }
 
     let currentStage = "import";
+    let completedInvoiceId = null;
+    const pollingController = new AbortController();
+    pollingControllerRef.current?.abort();
+    pollingControllerRef.current = pollingController;
     setError(null);
+    setWarning(null);
+    setPipelineStatus(null);
     setUploadData(null);
     setAnalysisData(null);
     setIsAnalyzing(true);
@@ -209,8 +328,8 @@ export default function UploadInvoice({ onNavigate, onAnalysisComplete }) {
     try {
       const importedInvoice = await importInvoice(selectedFile);
 
-      if (!importedInvoice?.invoiceId || !importedInvoice?.uploadUrl || !importedInvoice?.fileKey) {
-        throw new ApiError("Import response is missing invoiceId, uploadUrl, or fileKey.", {
+      if (!importedInvoice?.invoiceId || !importedInvoice?.fileKey) {
+        throw new ApiError("Import response is missing invoiceId or fileKey.", {
           code: "INVALID_IMPORT_RESPONSE",
           data: importedInvoice,
         });
@@ -218,32 +337,129 @@ export default function UploadInvoice({ onNavigate, onAnalysisComplete }) {
 
       const uploadIdentity = getUploadIdentity(importedInvoice);
       setUploadData(uploadIdentity);
+      applyPipelineStatus(importedInvoice);
 
-      currentStage = "upload";
-      await uploadInvoiceFile(importedInvoice.uploadUrl, selectedFile);
-      setStepIndex(1);
+      if (importedInvoice.status === "ANALYZED") {
+        const payload = { invoiceId: uploadIdentity.invoiceId, status: "ANALYZED", upload: uploadIdentity, existing: true };
+        setAnalysisData(payload);
+        completedInvoiceId = uploadIdentity.invoiceId;
+      } else {
+        let observedStatus = importedInvoice;
 
-      currentStage = "ocr";
-      await runInvoiceOcr(uploadIdentity.invoiceId, {
-        fileKey: uploadIdentity.fileKey,
-        cacheKey: uploadIdentity.cacheKey,
-      });
-      setStepIndex(2);
+        if (importedInvoice.uploadRequired !== false) {
+          if (!importedInvoice.uploadUrl) {
+            throw new ApiError("Import response is missing uploadUrl.", {
+              code: "MISSING_UPLOAD_URL",
+              data: importedInvoice,
+            });
+          }
+          currentStage = "upload";
+          await uploadInvoiceFile(importedInvoice.uploadUrl, selectedFile);
+          observedStatus = { invoiceId: uploadIdentity.invoiceId, status: "UPLOADED", progress: 25 };
+          applyPipelineStatus(observedStatus);
+        }
 
-      currentStage = "analyze";
-      const analyzedInvoice = await analyzeInvoice(uploadIdentity.invoiceId, {
-        cacheKey: uploadIdentity.cacheKey,
-      });
-      const payload = { ...analyzedInvoice, upload: uploadIdentity };
+        if (importedInvoice.existing && importedInvoice.status === "OCR_PROCESSING") {
+          currentStage = "ocr";
+          observedStatus = await pollUntil(
+            uploadIdentity.invoiceId,
+            (statusData) => statusData.status === "ANALYZED"
+              || statusData.status === "ANALYZING"
+              || (statusData.status === "OCR_PROCESSING" && Number(statusData.progress) >= 50),
+            pollingController.signal,
+          );
+        }
 
-      setStepIndex(3);
-      setAnalysisData(payload);
-      onAnalysisComplete?.(payload);
+        if (observedStatus.status === "ANALYZING") {
+          currentStage = "analyze";
+          observedStatus = await pollUntil(
+            uploadIdentity.invoiceId,
+            (statusData) => statusData.status === "ANALYZED",
+            pollingController.signal,
+          );
+        }
+
+        const ocrReady = observedStatus.status === "ANALYSIS_FAILED"
+          || (observedStatus.status === "OCR_PROCESSING" && Number(observedStatus.progress) >= 50);
+        if (observedStatus.status !== "ANALYZED" && observedStatus.status !== "ANALYZING" && !ocrReady) {
+          currentStage = "ocr";
+          observedStatus = await runTrackedStage(
+            uploadIdentity.invoiceId,
+            () => runInvoiceOcr(uploadIdentity.invoiceId, {
+              fileKey: uploadIdentity.fileKey,
+              cacheKey: uploadIdentity.cacheKey,
+            }),
+            (statusData) => statusData.status === "ANALYZED"
+              || (statusData.status === "OCR_PROCESSING" && Number(statusData.progress) >= 50),
+            pollingController.signal,
+          );
+        }
+
+        if (observedStatus.status !== "ANALYZED") {
+          currentStage = "analyze";
+          observedStatus = await runTrackedStage(
+            uploadIdentity.invoiceId,
+            () => analyzeInvoice(uploadIdentity.invoiceId, { cacheKey: uploadIdentity.cacheKey }),
+            (statusData) => statusData.status === "ANALYZED",
+            pollingController.signal,
+          );
+        }
+
+        if (observedStatus?.status !== "ANALYZED") {
+          observedStatus = await pollUntil(
+            uploadIdentity.invoiceId,
+            (statusData) => statusData.status === "ANALYZED",
+            pollingController.signal,
+          );
+        }
+
+        const savedInvoiceId = observedStatus?.invoice?.id || observedStatus?.invoiceId || uploadIdentity.invoiceId;
+        if (String(savedInvoiceId) !== String(uploadIdentity.invoiceId)) {
+          throw new ApiError("Analysis response contains an unexpected invoiceId.", {
+            code: "INVALID_ANALYSIS_RESPONSE",
+            data: observedStatus,
+          });
+        }
+        const payload = { ...observedStatus, invoiceId: uploadIdentity.invoiceId, status: "ANALYZED", upload: uploadIdentity };
+        applyPipelineStatus({ ...observedStatus, invoiceId: uploadIdentity.invoiceId, status: "ANALYZED", progress: 100 });
+        setAnalysisData(payload);
+        completedInvoiceId = uploadIdentity.invoiceId;
+      }
     } catch (currentError) {
+      if (currentError?.name === "AbortError") return;
       setAnalysisData(null);
       setError(getDisplayError(currentError, currentStage, t));
     } finally {
-      setIsAnalyzing(false);
+      if (!pollingController.signal.aborted) setIsAnalyzing(false);
+    }
+
+    if (completedInvoiceId && !pollingController.signal.aborted) {
+      try {
+        onAnalysisComplete?.({ invoiceId: completedInvoiceId, status: "ANALYZED" });
+      } catch (navigationError) {
+        setError(navigationError.message || t("upload.errors.invalidAnalysisResponse"));
+      }
+    }
+  }
+
+  async function checkCurrentStatus() {
+    if (!uploadData?.invoiceId || isAnalyzing) return;
+    setError(null);
+    try {
+      const statusData = await getInvoiceStatus(uploadData.invoiceId);
+      applyPipelineStatus(statusData);
+      if (terminalFailureStatuses.has(statusData.status)) {
+        setError(statusData.error?.message || t("upload.errors.pipelineFailed"));
+        return;
+      }
+      if (statusData.status === "ANALYZED") {
+        setAnalysisData({ invoiceId: uploadData.invoiceId, status: "ANALYZED", upload: uploadData });
+        onAnalysisComplete?.({ invoiceId: uploadData.invoiceId, status: "ANALYZED" });
+      } else {
+        setWarning(statusData.warning || { message: t("upload.statusStillProcessing") });
+      }
+    } catch (statusError) {
+      setError(getDisplayError(statusError, "status", t));
     }
   }
 
@@ -317,6 +533,13 @@ export default function UploadInvoice({ onNavigate, onAnalysisComplete }) {
           </div>
         )}
 
+        {warning && (
+          <div className="mt-4 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm font-semibold text-amber-800 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
+            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+            <span>{warning.message || String(warning)}</span>
+          </div>
+        )}
+
         {isComplete && (
           <div className="mt-4 rounded-lg border border-emerald-100 bg-emerald-50 p-3 text-sm font-semibold text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-300">
             {t("upload.success", { invoiceId: uploadData?.invoiceId || t("common.notAvailable") })}
@@ -332,8 +555,14 @@ export default function UploadInvoice({ onNavigate, onAnalysisComplete }) {
             <X className="h-4 w-4" />
             {t("actions.clear")}
           </button>
+          {uploadData?.invoiceId && !isAnalyzing && !isComplete && (
+            <button type="button" className="soft-button" onClick={checkCurrentStatus}>
+              <RefreshCw className="h-4 w-4" />
+              {t("upload.checkStatus")}
+            </button>
+          )}
           {isComplete && (
-            <button type="button" className="soft-button" onClick={() => onNavigate("analysis")}>
+            <button type="button" className="soft-button" onClick={() => onNavigate("analysis", null, { invoiceId: uploadData?.invoiceId })}>
               {t("actions.viewAiResult")}
             </button>
           )}
