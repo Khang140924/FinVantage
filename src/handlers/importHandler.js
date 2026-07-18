@@ -2,9 +2,13 @@ import { generateUploadUrl } from '../services/s3.service.js';
 import { cacheInvoiceData, getInvoiceById, getInvoiceFromCache } from '../services/db.service.js';
 import * as response from '../utils/response.js';
 import { logger } from '../utils/logger.js';
+import { requireAuth } from '../utils/cognitoAuth.js';
 
 // Hàm xử lý Lambda (Lambda handler) để nhập hóa đơn (import invoice) và sinh presigned URL
 export const handler = async (event) => {
+  const auth = await requireAuth(event);
+  if (auth.error) return auth.error;
+
   try {
     logger.info('Nhận yêu cầu sinh presigned URL để nhập hóa đơn', { event: { path: event.path, httpMethod: event.httpMethod } });
 

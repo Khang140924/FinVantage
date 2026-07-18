@@ -81,6 +81,10 @@ export const handler = async (event = {}) => {
     await cacheInvoiceData(cacheKey, cachedInvoice, 3600);
   };
 
+  const auth = await requireAuth(event);
+  if (auth.error) return auth.error;
+  const userId = auth.user.sub;
+
   let body;
   try {
     body = parseBody(event);

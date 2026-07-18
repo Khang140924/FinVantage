@@ -1,9 +1,13 @@
 import { updateInvoicePaymentStatus } from '../services/db.service.js';
 import * as response from '../utils/response.js';
 import { logger } from '../utils/logger.js';
+import { requireAuth } from '../utils/cognitoAuth.js';
 
 // Hàm xử lý Lambda (Lambda handler) để xử lý thanh toán (payment processing) liên quan tới hóa đơn
 export const handler = async (event) => {
+  const auth = await requireAuth(event);
+  if (auth.error) return auth.error;
+
   try {
     logger.info('Nhận yêu cầu xử lý thanh toán hóa đơn', { event });
 

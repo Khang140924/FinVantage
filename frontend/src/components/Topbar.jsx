@@ -17,6 +17,15 @@ export default function Topbar({
   notificationRefreshKey,
 }) {
   const { language, setLanguage, t } = useLanguage();
+  const { user } = useAuth();
+
+  const displayName = user?.name || user?.email || t("topbar.guest");
+  const initials = displayName
+    .split(/[\s@.]+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase())
+    .join("");
 
   return (
     <header className="sticky top-0 z-20 border-b border-slate-200 bg-white/90 px-4 py-4 backdrop-blur dark:border-slate-800 dark:bg-slate-950/90 sm:px-6 lg:px-8">
