@@ -10,7 +10,6 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { categorySpending, spendingByDay } from "../data/mockData.js";
 import { useLanguage } from "../i18n/LanguageContext.jsx";
 import { formatCurrency } from "../utils/format.js";
 
@@ -42,7 +41,7 @@ function PieTooltip({ active, payload }) {
   );
 }
 
-export function ExpenseLineChart({ data = spendingByDay }) {
+export function ExpenseLineChart({ data = [] }) {
   const { t } = useLanguage();
 
   return (
@@ -74,23 +73,12 @@ export function ExpenseLineChart({ data = spendingByDay }) {
           isAnimationActive
           animationDuration={900}
         />
-        <Area
-          type="monotone"
-          name={t("dashboard.dailyBudget")}
-          dataKey="budget"
-          stroke="#94a3b8"
-          strokeWidth={2}
-          fill="transparent"
-          strokeDasharray="5 5"
-          isAnimationActive
-          animationDuration={900}
-        />
       </AreaChart>
     </ResponsiveContainer>
   );
 }
 
-export function CategoryDonutChart({ data = categorySpending }) {
+export function CategoryDonutChart({ data = [] }) {
   return (
     <ResponsiveContainer width="100%" height={320}>
       <PieChart>

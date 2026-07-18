@@ -1,6 +1,5 @@
 import {
-  ArrowDownRight,
-  ArrowUpRight,
+  CalendarDays,
   CircleDollarSign,
   FileText,
   Plus,
@@ -10,10 +9,9 @@ import {
 import { CategoryDonutChart, ExpenseLineChart } from "../components/Charts.jsx";
 import DataSourceBadge from "../components/DataSourceBadge.jsx";
 import StatusBadge from "../components/StatusBadge.jsx";
-import { categorySpending, transactions } from "../data/mockData.js";
 import { useLanguage } from "../i18n/LanguageContext.jsx";
 import { buildCategorySpending } from "../utils/invoiceTransform.js";
-import { formatCurrency, formatPercent } from "../utils/format.js";
+import { formatCurrency } from "../utils/format.js";
 
 const toneClasses = {
   emerald: "bg-emerald-50 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300",
@@ -22,52 +20,13 @@ const toneClasses = {
   rose: "bg-rose-50 text-rose-700 dark:bg-rose-950 dark:text-rose-300",
 };
 
-function getStats(summary, source, t) {
-  if (source === "mock") {
-    return [
-      {
-        label: t("dashboard.stats.monthlySpending"),
-        value: 9890000,
-        change: -6.4,
-        detail: t("dashboard.stats.plannedBudget"),
-        icon: Wallet,
-        tone: "emerald",
-        currency: true,
-      },
-      {
-        label: t("dashboard.stats.invoicesAnalyzed"),
-        value: "128",
-        change: 18.2,
-        detail: t("dashboard.stats.thisMonth"),
-        icon: FileText,
-        tone: "blue",
-      },
-      {
-        label: t("dashboard.stats.pendingOcr"),
-        value: "7",
-        change: -2.1,
-        detail: t("dashboard.stats.waitingInQueue"),
-        icon: ReceiptText,
-        tone: "amber",
-      },
-      {
-        label: t("dashboard.stats.riskAlerts"),
-        value: "3",
-        change: 1.2,
-        detail: t("dashboard.stats.needReview"),
-        icon: CircleDollarSign,
-        tone: "rose",
-      },
-    ];
-  }
-
+function getStats(summary, alertCount, t) {
   const safeSummary = summary || {};
 
   return [
     {
       label: t("dashboard.stats.totalSpending"),
       value: Number(safeSummary.total_amount || 0),
-      change: 0,
       detail: t("dashboard.stats.fromAnalyzedInvoices"),
       icon: Wallet,
       tone: "emerald",
@@ -76,7 +35,6 @@ function getStats(summary, source, t) {
     {
       label: t("dashboard.stats.invoicesAnalyzed"),
       value: String(safeSummary.total_invoices || 0),
-      change: 0,
       detail: t("dashboard.stats.savedInPostgresql"),
       icon: FileText,
       tone: "blue",
@@ -84,52 +42,49 @@ function getStats(summary, source, t) {
     {
       label: t("dashboard.stats.unpaidAmount"),
       value: Number(safeSummary.unpaid_amount || 0),
-      change: 0,
       detail: t("dashboard.stats.invoices", { count: safeSummary.unpaid_count || 0 }),
       icon: ReceiptText,
       tone: "amber",
       currency: true,
     },
     {
-      label: t("dashboard.stats.paidInvoices"),
-      value: String(safeSummary.paid_count || 0),
-      change: 0,
-      detail: formatCurrency(safeSummary.paid_amount || 0),
+      label: t("dashboard.stats.riskAlerts"),
+      value: String(alertCount || 0),
+      detail: t("dashboard.stats.needReview"),
       icon: CircleDollarSign,
       tone: "rose",
     },
   ];
 }
 
-export default function Dashboard({ onNavigate, invoices = [], summary = null, apiStatus = {} }) {
+export default function Dashboard({ onNavigate, invoices = [], summary = null, apiStatus = {}, alerts = [], onMonthChange }) {
   const { t } = useLanguage();
-  const dataSource = apiStatus.source === "backend" ? "backend" : "mock";
+  const dataSource = "backend";
   const liveCategorySpending = buildCategorySpending(summary);
-  const categoryData = dataSource === "backend" ? liveCategorySpending : categorySpending;
-  const visibleTransactions = dataSource === "backend" ? invoices : transactions;
+  const categoryData = liveCategorySpending;
+  const visibleTransactions = invoices;
   const totalCategorySpend = categoryData.reduce((sum, item) => sum + item.value, 0);
-  const stats = getStats(summary, dataSource, t);
+  const stats = getStats(summary, alerts.length, t);
+  const selectedMonth = summary?.selected_month || "";
+  const now = new Date();
+  const currentMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  const monthOptions = [...new Set([selectedMonth, currentMonth, ...(summary?.available_months || [])].filter(Boolean))];
+  const dailyData = (summary?.daily_spending || []).map((item) => ({
+    day: new Date(`${item.day}T00:00:00`).toLocaleDateString("vi-VN", { day: "2-digit", month: "2-digit" }),
+    expense: Number(item.expense || 0),
+  }));
 
   return (
     <div className="space-y-6">
       <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         {stats.map((stat) => {
           const Icon = stat.icon;
-          const isPositive = stat.change >= 0;
           return (
             <article key={stat.label} className="app-card app-card-hover p-5">
               <div className="flex items-start justify-between gap-4">
                 <div className={`flex h-11 w-11 items-center justify-center rounded-lg ${toneClasses[stat.tone]}`}>
                   <Icon className="h-5 w-5" />
                 </div>
-                <span
-                  className={`flex items-center gap-1 text-xs font-bold ${
-                    isPositive ? "text-emerald-600" : "text-rose-600"
-                  }`}
-                >
-                  {isPositive ? <ArrowUpRight className="h-3.5 w-3.5" /> : <ArrowDownRight className="h-3.5 w-3.5" />}
-                  {formatPercent(stat.change)}
-                </span>
               </div>
               <p className="mt-5 text-sm font-medium text-slate-500 dark:text-slate-400">{stat.label}</p>
               <p className="mt-2 text-2xl font-bold tracking-tight text-slate-950 dark:text-white">
@@ -148,17 +103,35 @@ export default function Dashboard({ onNavigate, invoices = [], summary = null, a
               <h2 className="text-lg font-bold text-slate-950 dark:text-white">{t("dashboard.dailyExpenseTrend")}</h2>
               <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">{t("dashboard.dailyExpenseTrendDesc")}</p>
             </div>
-            <button type="button" className="soft-button">
-              {t("dashboard.monthLabel")}
-            </button>
+            <label className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 shadow-sm dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200">
+              <CalendarDays className="h-4 w-4 text-emerald-600" />
+              <span className="sr-only">{t("dashboard.selectMonth")}</span>
+              <select
+                value={selectedMonth}
+                onChange={(event) => onMonthChange?.(event.target.value)}
+                className="bg-transparent outline-none"
+                aria-label={t("dashboard.selectMonth")}
+              >
+                {monthOptions.map((month) => {
+                  const [year, monthNumber] = month.split("-");
+                  return <option key={month} value={month}>{t("dashboard.monthOption", { month: Number(monthNumber), year })}</option>;
+                })}
+              </select>
+            </label>
           </div>
-          <ExpenseLineChart />
+          {dailyData.length ? <ExpenseLineChart data={dailyData} /> : (
+            <div className="flex min-h-[320px] flex-col items-center justify-center rounded-lg border border-dashed border-slate-200 bg-slate-50 px-6 text-center dark:border-slate-800 dark:bg-slate-950">
+              <CalendarDays className="h-9 w-9 text-slate-400" />
+              <h3 className="mt-4 font-bold text-slate-900 dark:text-white">{t("dashboard.noMonthlyDataTitle")}</h3>
+              <p className="mt-2 max-w-md text-sm leading-6 text-slate-500 dark:text-slate-400">{t("dashboard.noMonthlyDataMessage")}</p>
+            </div>
+          )}
         </article>
 
         <article className="app-card app-card-hover bg-gradient-to-br from-emerald-600 to-sky-600 p-5 text-white">
           <p className="text-sm font-semibold text-emerald-50">{t("dashboard.trackedSpending")}</p>
           <p className="mt-4 text-4xl font-bold tracking-tight">
-            {formatCurrency(dataSource === "backend" ? summary?.total_amount ?? 0 : 48250000)}
+            {formatCurrency(summary?.total_amount ?? 0)}
           </p>
           <p className="mt-2 text-sm text-emerald-50">{t("dashboard.trackedSpendingDesc")}</p>
           <div className="mt-8 grid grid-cols-2 gap-3">
@@ -179,7 +152,7 @@ export default function Dashboard({ onNavigate, invoices = [], summary = null, a
           </div>
           <div className="mt-8 rounded-lg bg-white/10 p-4 ring-1 ring-white/20">
             <p className="text-sm leading-6 text-emerald-50">
-              {dataSource === "mock" ? t("dashboard.connectBackend") : t("dashboard.backendMessage")}
+              {apiStatus.error || t("dashboard.backendMessage")}
             </p>
           </div>
         </article>

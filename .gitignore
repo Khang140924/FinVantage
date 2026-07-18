@@ -1,5 +1,12 @@
+# Environment files: keep only the documented examples in Git.
 .env
+.env.*
+!.env.example
+!frontend/.env.example
+frontend/.env.local
+
 node_modules/
+frontend/node_modules/
 uploads/
 data/
 !frontend/src/data/
@@ -7,8 +14,7 @@ data/
 .serverless/
 .webpack/
 dist/
+frontend/dist/
 build/
 serverless-offline*.log
 *.log
-
-frontend/.env.local

@@ -47,7 +47,7 @@ function NavButton({ item, isActive, onNavigate }) {
   );
 }
 
-export default function Sidebar({ activePage, onNavigate }) {
+export default function Sidebar({ activePage, onNavigate, monthlyUsage = 0 }) {
   const { t } = useLanguage();
   const { logout } = useAuth();
 
@@ -92,11 +92,8 @@ export default function Sidebar({ activePage, onNavigate }) {
               {t("sidebar.monthlyUsage")}
             </p>
             <p className="mt-1 text-xs leading-5 text-slate-600 dark:text-slate-400">
-              {t("sidebar.monthlyUsageDescription")}
+              {t("sidebar.monthlyUsageDescription", { count: monthlyUsage })}
             </p>
-            <div className="mt-4 h-2 overflow-hidden rounded-full bg-white dark:bg-slate-900">
-              <div className="h-full w-[64%] rounded-full bg-emerald-500" />
-            </div>
           </div>
 
           <button

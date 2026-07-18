@@ -18,6 +18,11 @@ const verifier = (() => {
   });
 })();
 
+const MOCK_ID_TOKEN = 'finvantage-mock-id-token';
+// Mock authentication is always opt-in. NODE_ENV=development alone must never
+// make a Cognito-configured API accept the development token.
+const isMockTokenAllowed = () => process.env.USE_MOCK_AUTH === 'true';
+
 const extractToken = (event = {}) => {
   const header = event.headers?.Authorization || event.headers?.authorization;
   if (!header) return null;
@@ -26,7 +31,9 @@ const extractToken = (event = {}) => {
 };
 
 export const getAuthUser = async (event = {}) => {
-  if (process.env.USE_MOCK_AUTH === 'true') {
+  const token = extractToken(event);
+
+  if (isMockTokenAllowed() && token === MOCK_ID_TOKEN) {
     return { sub: 'mock-user', email: 'mock@example.com', name: 'Mock User' };
   }
 
@@ -36,7 +43,6 @@ export const getAuthUser = async (event = {}) => {
     throw error;
   }
 
-  const token = extractToken(event);
   if (!token) {
     const error = new Error('Thiếu Authorization token (Missing bearer token).');
     error.statusCode = 401;
@@ -49,7 +55,8 @@ export const getAuthUser = async (event = {}) => {
     return {
       sub: claims.sub,
       email: claims.email,
-      name: claims.name || claims.email,
+      name: claims.name || claims.preferred_username || claims.email,
+      preferred_username: claims.preferred_username,
       emailVerified: claims.email_verified,
     };
   } catch (error) {

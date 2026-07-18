@@ -1,73 +1,105 @@
 import { extractInvoiceData } from '../services/textract.service.js';
-import { cacheInvoiceData } from '../services/db.service.js';
+import { cacheInvoiceData, createNotification } from '../services/db.service.js';
 import { logger } from '../utils/logger.js';
 import { buildOcrCacheKey, sanitizeInvoiceId } from '../utils/invoice.js';
-import { normalizeOcrCachePayload } from '../utils/textractExpense.js';
+import { assertValidOcrPayload, normalizeOcrCachePayload } from '../utils/textractExpense.js';
 
-export const handler = async (event) => {
-  try {
-    logger.info('Received OCR trigger from S3', { recordsCount: event.Records?.length || 0 });
+const cacheStatus = (cacheKey, invoiceId, fileKey, userId, status, extra = {}) => cacheInvoiceData(cacheKey, {
+  invoiceId,
+  userId,
+  fileKey,
+  sourceFileKey: fileKey,
+  source_file_key: fileKey,
+  status,
+  updatedAt: new Date().toISOString(),
+  ...extra
+});
 
-    if (!event.Records || event.Records.length === 0) {
-      logger.warn('No S3 event records found in OCR request.');
-      return;
+const getUserIdFromFileKey = (fileKey) => fileKey.match(/^uploads\/([^/]+)\//)?.[1] || null;
+
+export const handler = async (event = {}) => {
+  const records = event.Records || [];
+  logger.info('Received OCR trigger from S3', { recordsCount: records.length });
+  if (!records.length) return;
+
+  for (const record of records) {
+    const bucketName = record.s3.bucket.name;
+    const fileKey = decodeURIComponent(record.s3.object.key.replace(/\+/g, ' '));
+    if (!fileKey.startsWith('uploads/')) {
+      logger.info('Skipping S3 object outside uploads prefix', { fileKey });
+      continue;
     }
 
-    for (const record of event.Records) {
-      const bucketName = record.s3.bucket.name;
-      const objectKey = decodeURIComponent(record.s3.object.key.replace(/\+/g, ' '));
+    const invoiceId = sanitizeInvoiceId(fileKey);
+    const userId = getUserIdFromFileKey(fileKey);
+    const cacheKey = buildOcrCacheKey(invoiceId);
+    try {
+      await cacheStatus(cacheKey, invoiceId, fileKey, userId, 'UPLOADED', { progress: 25, uploadConfirmed: true });
+      await cacheStatus(cacheKey, invoiceId, fileKey, userId, 'OCR_PROCESSING', { progress: 35, uploadConfirmed: true });
+      logger.info('Starting S3-triggered invoice OCR', { invoiceId, fileKey, status: 'OCR_PROCESSING' });
 
-      logger.info('Processing S3 OCR record', { bucketName, objectKey });
-
-      if (!objectKey.startsWith('uploads/')) {
-        logger.info('Skipping file outside uploads prefix', { objectKey });
-        continue;
-      }
-
-      logger.info('Starting Textract invoice OCR extraction', { bucketName, objectKey });
-      const expenseDocuments = await extractInvoiceData(bucketName, objectKey);
-
-      const invoiceId = sanitizeInvoiceId(objectKey);
-      const primaryCacheKey = buildOcrCacheKey(invoiceId);
-      const legacyCacheKey = `cache:invoice:${objectKey}`;
+      const expenseDocuments = await extractInvoiceData(bucketName, fileKey);
       const cachedInvoice = normalizeOcrCachePayload({
         invoiceId,
-        fileKey: objectKey,
-        expenseDocuments
+        fileKey,
+        userId,
+        expenseDocuments,
+        status: 'OCR_PROCESSING'
       });
 
-      logger.info('Textract OCR extraction completed', {
-        objectKey,
+      logger.info('S3-triggered Textract result normalized', {
         invoiceId,
-        primaryCacheKey,
-        legacyCacheKey,
-        documentsCount: expenseDocuments.length,
-        rawTextLength: cachedInvoice.rawText.length
+        fileKey,
+        expenseDocumentsCount: expenseDocuments.length,
+        rawTextLength: cachedInvoice.rawText.length,
+        vendorFound: !cachedInvoice.warning,
+        totalFound: Number.isFinite(cachedInvoice.totalAmount),
+        lineItemsCount: cachedInvoice.lineItems.length
       });
 
-      if (!cachedInvoice.rawText) {
-        logger.warn('Textract OCR result did not contain raw text', {
-          objectKey,
+      assertValidOcrPayload(cachedInvoice);
+      await cacheInvoiceData(cacheKey, cachedInvoice);
+      logger.info('OCR data cached for analysis', { invoiceId, fileKey, cacheKey });
+    } catch (error) {
+      const errorCode = error.code || 'OCR_PROCESSING_FAILED';
+      try {
+        await cacheStatus(cacheKey, invoiceId, fileKey, userId, 'OCR_FAILED', {
+          progress: 50,
+          errorCode,
+          errorMessage: error.message
+        });
+      } catch (cacheError) {
+        logger.warn('Could not cache OCR_FAILED status from S3 trigger', {
           invoiceId,
-          primaryCacheKey,
-          legacyCacheKey
+          fileKey,
+          error: cacheError.message
         });
       }
-
-      await cacheInvoiceData(primaryCacheKey, cachedInvoice);
-      await cacheInvoiceData(legacyCacheKey, cachedInvoice);
-
-      logger.info('OCR invoice data cached in Redis', {
-        objectKey,
+      logger.error('S3-triggered invoice OCR failed', error, {
         invoiceId,
-        primaryCacheKey,
-        legacyCacheKey
+        fileKey,
+        status: 'OCR_FAILED',
+        failureCode: errorCode
       });
+      if (userId) {
+        try {
+          await createNotification({
+            userId,
+            type: 'INVOICE_FAILED',
+            title: 'Xử lý hóa đơn thất bại',
+            message: error.message,
+            referenceId: invoiceId,
+            dedupeKey: `invoice:${invoiceId}:failed:ocr:${errorCode}`
+          });
+        } catch (notificationError) {
+          logger.warn('Could not persist S3-triggered OCR failure notification', {
+            invoiceId,
+            fileKey,
+            error: notificationError.message
+          });
+        }
+      }
+      throw error;
     }
-
-    logger.info('Finished processing OCR S3 event.');
-  } catch (error) {
-    logger.error('Failed to process OCR S3 event', error);
-    throw error;
   }
 };
