@@ -1,372 +1,231 @@
-# Huong Dan Chay FinVantage
+# Chạy FinVantage
 
-## 1. Tong quan project
+FinVantage là ứng dụng quản lý chi tiêu theo hóa đơn. Luồng xử lý khi triển khai AWS là:
 
-FinVantage gom backend Serverless Node.js va frontend React.
+`Cognito → API Gateway/Lambda → S3 → Textract → Redis → Bedrock → PostgreSQL/Aurora (qua RDS Proxy)`.
 
-Frontend hien co cac man hinh:
+Trong môi trường local, mock auth, PostgreSQL Docker và Redis Docker chỉ phục vụ phát triển. Không đưa mật khẩu người dùng vào PostgreSQL; production dùng Amazon Cognito. Ảnh đại diện và hóa đơn luôn ở S3 private, còn PostgreSQL chỉ lưu khóa/metadata.
 
-- Dashboard
-- Upload Invoice
-- Analysis Result
-- Transactions
-- Budget & Alerts
-- Settings
+## 1. Yêu cầu
 
-Backend co cac API chinh:
+- Node.js 20 trở lên và npm.
+- Docker Desktop nếu chạy PostgreSQL và Redis local.
+- AWS CLI/profile hợp lệ chỉ khi dùng Cognito, S3, Textract hoặc Bedrock thật.
+- Một bản `.env` local tạo từ `.env.example`. Không commit file này.
 
-- Import invoice
-- OCR
-- Analyze
-- Invoices list
-- Dashboard summary
-- Invoice detail, update and delete
-- Category budgets and budget alerts
-- User profile and preferences
-- S3 avatar upload
-
-## 2. Yeu cau moi truong
-
-- Node.js
-- npm
-- PostgreSQL local
-- Redis Docker hoac Redis local
-- AWS CLI chi can neu muon test S3/Textract that
-- Docker Desktop chi can neu dung Redis Docker
-
-## 3. Cai dependencies
-
-Root:
-
-```bash
-npm install
-```
-
-Frontend:
-
-```bash
-cd frontend
-npm install
-```
-
-## 4. Cau hinh backend `.env`
-
-Khong commit `.env`. Tao file `.env` dua theo `.env.example`.
-
-Bien chinh:
-
-```text
-AWS_REGION
-AWS_REGION_NAME
-S3_RAW_BUCKET_NAME
-S3_BUCKET_NAME
-DB_HOST
-DB_PORT
-DB_NAME
-DB_USER
-DB_PASSWORD
-DB_SSL
-REDIS_URL
-USE_MOCK_AI
-USE_MOCK_AUTH
-NODE_ENV
-```
-
-## 5. Cau hinh frontend
-
-Tao `frontend/.env.local`:
-
-```text
-VITE_API_BASE_URL=http://localhost:3000/dev
-```
-
-## 6. Tao database PostgreSQL
-
-Tao database `finvantage`, sau do chay `schema.sql`. Co the chay lai file nay tren database cu; cac lenh migration su dung `IF NOT EXISTS` va se giu du lieu hien tai.
-
-Vi du Windows:
+Sau khi clone dự án, cài dependencies:
 
 ```powershell
-"C:\Program Files\PostgreSQL\18\bin\psql.exe" -h localhost -U postgres -d finvantage -f schema.sql
+npm install
+npm --prefix frontend install
 ```
 
-## 7. Chay Redis
+## 2. Cấu hình local an toàn
 
-Neu dung Docker:
+Sao chép `.env.example` thành `.env`, rồi chỉ điền giá trị ở máy local. Repository chỉ chứa placeholder trong `.env.example`.
 
-```bash
-docker start finvantage-redis
-docker exec finvantage-redis redis-cli ping
-```
+Các nhóm biến chính:
 
-Ket qua mong doi:
+| Nhóm | Biến |
+| --- | --- |
+| Auth BFF | `NODE_ENV`, `AUTH_SERVER_PORT`, `SESSION_SECRET`, `USE_MOCK_AUTH` |
+| Cognito | `COGNITO_ISSUER`, `COGNITO_USER_POOL_ID`, `COGNITO_CLIENT_ID`, `COGNITO_CLIENT_SECRET`, `COGNITO_DOMAIN`, `COGNITO_REDIRECT_URI`, `COGNITO_LOGOUT_URI`, `COGNITO_SCOPES` |
+| AWS | `AWS_REGION`, `AWS_REGION_NAME`, `AWS_PROFILE`, `S3_RAW_BUCKET_NAME`, `PROFILE_AVATAR_BUCKET_NAME`, `BEDROCK_MODEL_ID`, `SNS_BUDGET_ALERTS_TOPIC_ARN` |
+| Database | `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_SSL`, `RDS_PROXY_ENDPOINT` |
+| Cache/AI | `REDIS_URL`, `USE_MOCK_AI` |
 
-```text
-PONG
-```
+`SESSION_SECRET`, database password, Cognito client secret và AWS credential phải là giá trị riêng tư. Đội ngũ có thể giữ một file cấu hình riêng tư ngoài repository, nhưng không sao chép nội dung của file đó vào Git, ticket hoặc tài liệu công khai.
 
-## 8. Chay backend local
+### Mock local (khuyến nghị khi phát triển UI)
 
-```bash
-npm run api:dev
-```
-
-## 8b. Chay Auth BFF (AWS Cognito) local
-
-Auth chay nhu mot Backend-for-Frontend (BFF) bang Express + openid-client + express-session.
-Server lang nghe port 4000, xu ly OIDC Authorization Code Flow voi Cognito (confidential client).
-
-```bash
-npm run auth:dev
-```
-
-Trinh duyet SPA (Vite, port 5174) se proxy `/auth/*` sang BFF nay (xem `frontend/vite.config.js`).
-
-### Mock auth local (khong can Cognito)
-
-Dat trong `.env` root:
-
-```text
-USE_MOCK_AUTH=true
+```dotenv
 NODE_ENV=development
-COGNITO_LOGOUT_URI=http://localhost:5174/
+USE_MOCK_AUTH=true
+USE_MOCK_AI=true
+DB_HOST=localhost
+DB_PORT=5432
+DB_NAME=finvantage
+DB_USER=postgres
+DB_SSL=false
+REDIS_URL=redis://localhost:6379
 ```
 
-Sau do chay:
+Điền `DB_PASSWORD` và `SESSION_SECRET` riêng tại máy local. Không cần Cognito discovery khi `USE_MOCK_AUTH=true`: auth server tạo phiên development, `/auth/me` trả mock user và logout xóa phiên đó. Mock token chỉ được backend chấp nhận khi `USE_MOCK_AUTH=true` hoặc `NODE_ENV=development`; production không fallback sang mock user.
 
-```bash
-npm run auth:dev
+## 3. Khởi động local
+
+### Terminal 1 – PostgreSQL và Redis
+
+```powershell
+docker compose up -d
+```
+
+Docker expose PostgreSQL tại `localhost:5432` và Redis tại `localhost:6379`. Khởi tạo database theo schema dự án nếu chưa có dữ liệu:
+
+```powershell
+Get-Content schema.sql | docker exec -i finvantage-postgres psql -U postgres -d finvantage
+```
+
+### Terminal 2 – API local
+
+```powershell
 npm run api:dev
+```
+
+Serverless Offline mặc định phục vụ API ở cổng `3000`.
+
+### Terminal 3 – Auth server
+
+```powershell
+npm run auth:dev
+```
+
+Auth BFF chạy ở cổng `4000`. Vite proxy các đường dẫn `/auth` đến cổng này, vì vậy frontend không nhận hoặc lưu Cognito client secret.
+
+### Terminal 4 – Frontend
+
+```powershell
 npm run frontend:dev
 ```
 
-Voi mock mode, Auth BFF khong goi `Issuer.discover` va khong can cac bien
-`COGNITO_ISSUER`, `COGNITO_CLIENT_ID` hay `COGNITO_CLIENT_SECRET`. Dang nhap
-development se tao session cho user `mock-user`; `/auth/me` tra mock token cho
-SPA. Backend chi chap nhan token nay khi `USE_MOCK_AUTH=true`. `NODE_ENV=development`
-khong tu dong mo mock auth, vi vay local Cognito voi `USE_MOCK_AUTH=false` van chi
-chap nhan JWT Cognito.
+Mở `http://localhost:5174`. Cổng `3002` có thể được Serverless Offline dùng cho Lambda trong một số cấu hình; không phải một ứng dụng người dùng cần mở trực tiếp.
 
-Mock mode ho tro UI login, signup, verify email va forgot/reset password de test
-giao dien. Ma xac nhan development la `123456`. Mock mode khong luu hoac kiem
-tra mat khau that. FinVantage khong co tab doi mat khau rieng; production dung
-Cognito Managed Login cho cac thao tac tai khoan va khoi phuc mat khau.
-
-## 13. Cau hinh AWS Cognito
-
-Tao User Pool tai `ap-southeast-2` (hoac region cua ban) va App Client kieu
-**confidential** (co client secret). Cap nhat `.env` (root) theo `.env.example`:
-
-```text
-COGNITO_ISSUER
-COGNITO_USER_POOL_ID
-COGNITO_CLIENT_ID
-COGNITO_CLIENT_SECRET
-COGNITO_DOMAIN
-COGNITO_REDIRECT_URI
-COGNITO_LOGOUT_URI
-SESSION_SECRET
-```
-
-Trong Cognito App Client, them:
-
-- Allowed Callback URL: `http://localhost:5174/auth/callback`
-- Allowed Sign-out URL: `http://localhost:5174/`
-- OAuth scopes: `openid email profile`
-- Hosted UI: bat va thiet lap domain (`COGNITO_DOMAIN`)
-- Authentication flow: bat `ALLOW_USER_PASSWORD_AUTH` de form FinVantage co the
-  dang nhap qua BFF. Neu chua bat flow nay, nguoi dung van co the chon Hosted UI fallback.
-- Bat email attribute, automatic email verification va account recovery bang email.
-
-Production phai dat:
-
-```text
-NODE_ENV=production
-USE_MOCK_AUTH=false
-SESSION_SECRET=<random-secret>
-```
-
-Mat khau dang ky/dang nhap/doi/reset chi duoc Cognito xu ly. PostgreSQL khong co
-cot password va khong luu password hoac ma xac nhan.
-
-Luong dang nhap: SPA -> `/auth/login` (BFF) -> Cognito Hosted UI -> redirect
-`/auth/callback` (BFF verify, luu session, tra id_token) -> SPA goi `/auth/me`
-de lay token, luu vao localStorage va gui kem header `Authorization: Bearer`
-cho cac API serverless. Khi reload, `/auth/me` khoi phuc user tu session BFF va
-refresh token neu id token sap het han. Backend xac thuc id_token qua JWKS
-(`src/utils/cognitoAuth.js`). Khi logout, BFF xoa session truoc khi redirect qua
-Cognito `/logout`.
-
-Neu chi muon chay local ma khong can Cognito that, dung huong dan Mock auth local o tren.
-
-Luu y: du lieu hoa don cu co `user_id = 'demo-user'` se khong hien thi voi
-tai khoan Cognito moi (sub khac). Hay seed lai du lieu hoac dung `USE_MOCK_AUTH`.
-
-
-## 9. Chay frontend local
-
-```bash
-npm run frontend:dev
-```
-
-## 10. API local
-
-```text
-POST http://localhost:3000/dev/invoices/import
-POST http://localhost:3000/dev/invoices/{id}/ocr
-POST http://localhost:3000/dev/invoices/{id}/analyze
-GET  http://localhost:3000/dev/invoices
-GET  http://localhost:3000/dev/invoices/{id}
-GET  http://localhost:3000/dev/invoices/{id}/status
-PUT  http://localhost:3000/dev/invoices/{id}
-DELETE http://localhost:3000/dev/invoices/{id}
-GET  http://localhost:3000/dev/dashboard-summary
-GET  http://localhost:3000/dev/budgets
-POST http://localhost:3000/dev/budgets
-DELETE http://localhost:3000/dev/budgets/{id}
-GET  http://localhost:3000/dev/me
-PUT  http://localhost:3000/dev/me
-GET  http://localhost:3000/dev/me/preferences
-PUT  http://localhost:3000/dev/me/preferences
-POST http://localhost:3000/dev/me/avatar/upload-url
-GET  http://localhost:3000/dev/notifications
-GET  http://localhost:3000/dev/notifications/unread-count
-PUT  http://localhost:3000/dev/notifications/{id}/read
-PUT  http://localhost:3000/dev/notifications/read-all
-DELETE http://localhost:3000/dev/notifications/{id}
-```
-
-Tat ca API `/me` lay `user_id` tu claim `sub` cua token. Gia tri `userId` trong
-request body (neu co) bi bo qua.
-
-Payload cap nhat giao dich (`PUT /invoices/{id}`) co the gom:
-
-```json
-{
-  "storeName": "Highlands Coffee",
-  "totalAmount": 132840,
-  "category": "An uong",
-  "transactionDate": "2026-07-16",
-  "status": "ANALYZED"
-}
-```
-
-Payload tao/cap nhat ngan sach theo danh muc (`POST /budgets`):
-
-```json
-{
-  "category": "An uong",
-  "amount": 3000000
-}
-```
-
-Ngan sach la theo thang hien tai va unique theo `(user_id, category, budget_month)`.
-Backend cong cac invoice cung danh muc trong thang, sau do tra `spent`, `limit`,
-`remaining`, `percentage` va `status`. Nguong trang thai: duoi 80% `normal`,
-80-99% `warning`, tu 100% `exceeded`.
-
-Danh muc hop le:
-
-```text
-An uong, Di chuyen, Mua sam, Giai tri, Hoa don, Suc khoe, Giao duc, Khac
-```
-
-Web notification duoc luu trong PostgreSQL. Cac su kien budget 80%/100% dung
-`dedupe_key` theo budget va thang de khong tao lap. Phan tich invoice thanh cong
-hoac that bai cung tao notification rieng.
-
-Dashboard, Transactions va Budget & Alerts chi hien thi du lieu backend that. Neu API loi, giao dien se hien thong bao loi thay vi tu dong doi sang mock data.
-
-## 11. Luu y ve AWS that
-
-- Neu chi chay Dashboard/Transactions tu database local thi khong can AWS.
-- Upload OCR that can AWS S3 + Textract + credentials hop le.
-- `USE_MOCK_AI=true` nghia la khong goi Bedrock that.
-- `USE_MOCK_AI=false` moi goi Bedrock that.
-
-## 11b. Trien khai account services tren AWS
-
-- API profile/preferences duoc khai bao bang HTTP events trong `serverless.yml`,
-  do do di qua API Gateway va Lambda.
-- Aurora/PostgreSQL production phai dat `RDS_PROXY_ENDPOINT` bang endpoint cua
-  RDS Proxy. Local development de trong bien nay va dung `DB_HOST`.
-- Chay `schema.sql` de tao `user_profiles` va `user_preferences` truoc khi goi API.
-- Dat `PROFILE_AVATAR_BUCKET_NAME` den S3 bucket private danh cho avatar. UI va
-  Lambda chi chap nhan JPG/JPEG/PNG toi da 2 MB. Object key co dang
-  `avatars/{cognito-sub}/avatar-{timestamp}.jpg|png`; database chi luu
-  `avatar_key`, khong luu binary/base64. `GET /me` tra presigned GET URL khi AWS
-  credentials san sang; neu local khong co credentials, profile van tra thanh
-  cong va avatar URL la `null`.
-- Frontend xin presigned PUT URL qua `POST /me/avatar/upload-url`, upload truc
-  tiep den S3 va sau do goi `PUT /me` de luu key. AWS credentials khong bao gio
-  duoc gui den browser. Bucket khong can va khong duoc bat public access.
-- Dat `SNS_BUDGET_ALERTS_TOPIC_ARN` den SNS topic production. Lambda phat event
-  sau khi invoice da luu thanh cong va chi khi user bat `email_alerts` va
-  `budget_guardrails`. Loi SNS khong rollback invoice.
-- Neu dung mot SNS topic chung, subscription email phai co filter policy theo
-  message attribute `userId` (va co the them `eventType`) de khong gui canh bao
-  cua user nay cho user khac.
-- Khong bat `USE_MOCK_AUTH` tren production. Mock token chi hop le khi
-  `USE_MOCK_AUTH=true`; `NODE_ENV=development` khong du de cho phep mock token.
-
-## 12. Khong commit cac file/thu muc
-
-```text
-.env
-node_modules/
-frontend/node_modules/
-frontend/dist/
-serverless-offline*.log
-```
-## Luồng hóa đơn thật và kiểm thử Phúc Long
-
-Luồng upload hiện dùng cùng một `invoiceId` cho cùng người dùng và cùng checksum file, vì vậy thử lại không tạo bản ghi trùng:
-
-`Cognito/mock dev → API import → S3 private → Textract AnalyzeExpense → Redis → Bedrock/mock AI → PostgreSQL`
-
-Trạng thái xử lý trong Redis: `UPLOADED`, `OCR_PROCESSING`, `OCR_FAILED`, `ANALYZING`, `ANALYZED`, `ANALYSIS_FAILED`. PostgreSQL chỉ nhận hóa đơn sau khi OCR có `ExpenseDocuments`, `raw_text` và `TOTAL` hợp lệ. `VENDOR_NAME` không bắt buộc; nếu thiếu hoặc chỉ là tiêu đề chung như `PHIẾU THANH TOÁN`, `TOTAL`, `BILL`, hệ thống lưu `Không xác định`, trả warning `OCR_VENDOR_NOT_FOUND` và vẫn tiếp tục phân tích.
-
-- `OCR_EMPTY_RESULT`: Textract không trả tài liệu hoặc văn bản OCR rỗng.
-- `OCR_TOTAL_NOT_FOUND`: không có `TOTAL` hợp lệ trong `SummaryFields`; `CASH` và `Change` không được dùng thay thế.
-
-## OCR line item normalization, search va currency
-
-`raw_text` va `raw_item_name` luon giu nguyen ket qua Textract. Moi line item moi
-co them `normalized_item_name`, `quantity`, `unit_price`, `total_price`,
-`confidence`, `normalization_changed` va `needs_review`. Dictionary/rule mo rong
-nam trong `src/utils/itemNormalization.js`. Ten da normalize chi dung de hien thi
-va tim kiem; sua ten mon qua `PUT /invoices/{id}` chi cap nhat `line_items`, khong
-cap nhat raw OCR, gia hoac so luong.
-
-Global search dung `GET /search?q=...`, toi da 20 ket qua. Lambda luon lay
-`user_id` tu Cognito token, truy van PostgreSQL bang parameter va khong tra
-`raw_text`, S3 key hoac du lieu ky thuat trong ket qua.
-
-He thong hien tai chua cau hinh nguon ty gia tin cay, vi vay VND la display
-currency duy nhat. Settings khong hien thi bo chon don vi tien te; backend van
-giu cac cot `invoices.currency` va `user_profiles.default_currency` cho giai doan
-co exchange-rate snapshot sau nay.
-
-UI co ErrorBoundary cho loi render khong du kien. Cac loi API upload/OCR/analyze
-du kien duoc bat ngay tren trang Upload, giu file da chon va hien thi dung buoc
-bi loi. Frontend goi `GET /invoices/{id}/status` moi 1,5 giay khi request timeout
-hoac mat ket noi, chi dieu huong den `/analysis/{invoiceId}` sau khi backend tra
-`ANALYZED`; trang ket qua tu tai lai du lieu bang invoice ID nen khong can F5.
-
-Chạy kiểm thử parser và lỗi không lưu database:
+Để dừng hạ tầng local:
 
 ```powershell
-node --test tests\textractExpense.test.js
-node tests\failurePipeline.integration.js
-node tests\vendorOptionalPipeline.integration.js
+docker compose down
 ```
 
-Kiểm thử tích hợp thật với `bill.jpg` (cần AWS credentials, S3 bucket, Textract, Redis và PostgreSQL):
+## 4. Đăng nhập và phiên làm việc
+
+### Mock auth
+
+Với `USE_MOCK_AUTH=true`, nhấn **Tiếp tục** ở trang login. Auth BFF tạo session development và trả user mock. Không bật tự động redirect ở trang login để người dùng chủ động bắt đầu đăng nhập.
+
+### Cognito thật
+
+Với `USE_MOCK_AUTH=false`, cấu hình đầy đủ các biến Cognito, redirect URI cho frontend và logout URI trong Cognito App Client. Nút **Tiếp tục** chuyển đến Cognito Managed Login. Cognito xử lý đăng ký, xác minh email, quên mật khẩu và đặt lại mật khẩu; ứng dụng không tự lưu mật khẩu.
+
+Sau callback, Auth BFF xác thực mã, giữ session HTTP-only và `/auth/me` trả claims `sub`, `email` cùng `name` hoặc `preferred_username`. Refresh frontend sẽ gọi lại `/auth/me` để khôi phục session. Logout xóa session rồi chuyển đến Cognito logout endpoint. Nếu chưa đăng nhập, protected route quay về login.
+
+## 5. Luồng upload hóa đơn
+
+1. Chọn JPG/JPEG/PNG/HEIC hoặc PDF hợp lệ. Chọn file **không** tự upload.
+2. Ảnh hiện preview lớn, giữ tỷ lệ và có thể bấm để mở lightbox. PDF hiện card với tên và dung lượng. Nút **Clear** xóa file/preview; object URL được revoke khi thay file, clear hoặc unmount.
+3. Nhấn **Tải lên & Phân tích**: frontend xin import/presigned PUT URL, upload S3, gọi OCR rồi gọi analyze theo `invoiceId`.
+4. Pipeline trạng thái là `UPLOADED → OCR_PROCESSING → ANALYZING → ANALYZED`; lỗi OCR/AI được ghi `OCR_FAILED` hoặc `ANALYSIS_FAILED`.
+5. Frontend polling trạng thái, hiển thị lỗi ngay tại trang upload và điều hướng kết quả bằng `invoiceId` thật, không yêu cầu F5.
+
+Trong AWS, S3 trigger hoặc API OCR gọi Textract AnalyzeExpense, kết quả tạm được giữ Redis rồi raw OCR thật được gửi Bedrock. `TOTAL` là bắt buộc; total rỗng tạo `OCR_EMPTY_RESULT` hoặc `OCR_TOTAL_NOT_FOUND`, không gọi AI và không lưu hóa đơn giả. Vendor có thể thiếu: hệ thống dùng `Không xác định` và warning, nhưng vẫn có thể hoàn tất nếu total/ocr hợp lệ.
+
+Mock AI chỉ sinh danh mục và gợi ý từ raw OCR; không được ghi đè vendor, total, ngày hay line item Textract. Idempotency/checksum và upsert theo invoice ID ngăn cùng một file làm tăng dữ liệu Dashboard hai lần.
+
+Ví dụ test thật Phúc Long (chỉ chạy khi đã được phép dùng AWS thật): total phải là `103000`, ngày `2018-09-11`, vendor PHUC LONG, category Ăn uống và ba món 40.000, 35.000, 28.000. Không chạy test AWS này trong CI/local mặc định vì có thể phát sinh chi phí.
+
+## 6. Các màn hình chính
+
+- **Dashboard:** lấy dữ liệu PostgreSQL theo user, cho chọn tháng/năm; nếu tháng hiện tại không có dữ liệu thì chọn tháng có giao dịch mới nhất. Có empty state rõ ràng.
+- **Transactions:** chỉ hiện Cửa hàng, Ngày, Danh mục, Số tiền, Trạng thái, Thao tác; dùng mã ngắn `HD-XXXXXXXX`, còn invoice ID thật vẫn dùng nội bộ cho xem/sửa/xóa.
+- **Analysis Result:** mặc định chỉ hiện thông tin hóa đơn, line item và gợi ý AI. “Xem chi tiết kỹ thuật” mới hiển thị raw OCR, invoice ID, S3/cache key, database payload và trạng thái pipeline.
+- **Settings/Profile:** lấy hồ sơ/preference từ API, không dùng dữ liệu tĩnh. Avatar upload qua presigned S3 URL private; frontend không nhận AWS credentials.
+- **Budget & Alerts:** ngân sách tháng theo danh mục, hiển thị đã chi/hạn mức/còn lại/progress. 80–99% là cảnh báo, từ 100% là vượt hạn mức.
+- **Notifications:** chuông hiển thị unread count và màu severity cao nhất: bình thường xanh, 80% vàng/cam, vượt hạn mức hoặc xử lý hóa đơn thất bại đỏ. Người dùng có thể đánh dấu đã đọc, đọc tất cả hoặc xóa.
+- **Global Search:** backend tìm theo cửa hàng, line item, danh mục, số tiền, ngày hoặc mã tham chiếu ngắn; giới hạn theo user đã xác thực.
+
+## 7. API local
+
+Tất cả API nghiệp vụ phải lấy user ID từ token/session xác thực, không nhận `userId` do frontend gửi.
+
+| Nhóm | Endpoint |
+| --- | --- |
+| Invoice | `POST /invoices/import`, `POST /invoices/{id}/ocr`, `POST /invoices/{id}/analyze`, `GET /invoices`, `GET/PUT/DELETE /invoices/{id}`, `GET /invoices/{id}/status` |
+| Tìm kiếm/Dashboard | `GET /search`, `GET /dashboard-summary` |
+| Budget | `GET/POST /budgets`, `DELETE /budgets/{id}` |
+| Hồ sơ | `GET/PUT /me`, `GET/PUT /me/preferences`, `POST /me/avatar/upload-url` |
+| Thông báo | `GET /notifications`, `GET /notifications/unread-count`, `PUT /notifications/{id}/read`, `PUT /notifications/read-all`, `DELETE /notifications/{id}` |
+| Thanh toán demo | `POST /payment` |
+
+`POST /me/avatar/upload-url` chỉ nhận JPG/JPEG/PNG không quá 2 MB và trả presigned PUT URL cho key private `avatars/{cognito-sub}/avatar-{timestamp}.{extension}`. Sau PUT, gửi `PUT /me` để lưu `avatar_key`; `GET /me` trả presigned GET URL ngắn hạn. Người dùng không thể sửa avatar/hồ sơ của user khác.
+
+Budget không cho hạn mức âm, 0 hoặc danh mục trùng trong cùng tháng. Frontend hiển thị `3.000.000 ₫` nhưng API nhận number `3000000`. Danh mục: Ăn uống, Di chuyển, Mua sắm, Giải trí, Hóa đơn, Sức khỏe, Giáo dục, Khác. Notification budget được dedupe theo ngân sách/tháng/ngưỡng để không gửi liên tục.
+
+## 8. Kiến trúc AWS production
+
+- **Cognito:** identity, Managed Login và claims. Không lưu password vào Aurora/PostgreSQL.
+- **API Gateway + Lambda:** public API cho profile, preferences, invoice, budget và notification.
+- **Aurora PostgreSQL qua RDS Proxy:** dữ liệu hồ sơ, preference, transaction, budget, notification và metadata.
+- **S3 private:** hóa đơn trong `uploads/`, avatar trong `avatars/`; chỉ Lambda có quyền S3 tối thiểu và frontend dùng presigned URL giới hạn thời gian.
+- **Textract:** `AnalyzeExpense` trích xuất vendor, total, ngày, item, price và raw text.
+- **Redis/ElastiCache:** giữ kết quả OCR/trạng thái pipeline ngắn hạn theo invoice/user.
+- **Bedrock:** phân loại/gợi ý sau khi có OCR hợp lệ.
+- **SNS:** Lambda có thể publish email cảnh báo ngân sách khi `SNS_BUDGET_ALERTS_TOPIC_ARN` được cấu hình. Local để biến này trống.
+
+`serverless.yml` cần được giữ tương thích với IAM tối thiểu: S3 object ở prefix `uploads/` và `avatars/`, Textract AnalyzeExpense, Bedrock InvokeModel và SNS Publish cho topic được chỉ định. Bucket S3 không bật public access.
+
+## 9. Build, syntax và test an toàn
+
+Chạy frontend production build:
 
 ```powershell
-$env:BILL_PATH='C:\duong-dan\bill.jpg'
-node tests\phucLong.integration.js
-node tests\checkPhucLongRecord.js
+npm.cmd --prefix frontend run build
 ```
 
-Trang kết quả có URL `/analysis/{invoiceId}` và luôn gọi `GET /invoices/{invoiceId}`. Vì vậy tải lại trang không phụ thuộc `location.state` hoặc bộ nhớ React.
+Chạy nhóm unit test UI/OCR:
+
+```powershell
+node --test tests/frontendUiHelpers.test.js tests/itemNormalization.test.js tests/textractExpense.test.js
+```
+
+Chạy syntax backend:
+
+```powershell
+node --check auth-server/index.js
+Get-ChildItem -Recurse -File src,auth-server,tests,frontend\src |
+  Where-Object { $_.Extension -in '.js', '.mjs', '.cjs' } |
+  Sort-Object FullName |
+  ForEach-Object { node --check $_.FullName; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }
+```
+
+Ba local integration test chỉ dùng mock/local services (không gọi AWS khi đặt biến như dưới đây):
+
+```powershell
+$env:USE_MOCK_AUTH='true'
+$env:USE_MOCK_AI='true'
+$env:SNS_BUDGET_ALERTS_TOPIC_ARN=''
+node tests/failurePipeline.integration.js
+node tests/vendorOptionalPipeline.integration.js
+node tests/search.integration.js
+```
+
+Không tự chạy `tests/phucLong.integration.js`, upload S3 thật, Textract, Bedrock hoặc deploy AWS nếu chưa có quyền/phê duyệt rõ ràng.
+
+## 10. Kiểm tra trước khi chia sẻ mã
+
+```powershell
+git diff --check
+git ls-files .env
+git ls-files frontend/.env.local
+git status --short
+```
+
+Hai lệnh `git ls-files` về env không được trả file nào. Không theo dõi `node_modules`, `frontend/dist`, log, `.serverless` artifact hoặc private env. Không dùng force push và không để credential trong source/documentation.
+
+## 11. Sự cố thường gặp
+
+| Hiện tượng | Cách kiểm tra |
+| --- | --- |
+| Không đăng nhập mock | Xác nhận auth server cổng 4000 đang chạy và `USE_MOCK_AUTH=true`; không cần Cognito issuer. |
+| Cognito trả 404 ở discovery | Kiểm tra `COGNITO_ISSUER` đúng user pool khi mock auth tắt. |
+| Settings báo không lấy được credential AWS | Hồ sơ thường chỉ đọc PostgreSQL; kiểm tra endpoint `/me`, DB và không yêu cầu S3 trừ khi đang tạo presigned avatar URL. |
+| Upload đứng hoặc trang đen | Kiểm tra API local, Redis, polling `/invoices/{id}/status` và lỗi hiển thị ở Upload. Không dựa hoàn toàn vào `location.state`. |
+| OCR không có kết quả | Hệ thống phải trả lỗi OCR, không lưu transaction giả. Kiểm tra S3 key/permission và Textract chỉ khi chạy AWS thật. |
+| Ảnh preview không hiển thị | Chọn định dạng ảnh hỗ trợ; Clear rồi chọn lại. PDF chỉ có file card, không render trang PDF. |
+| Dashboard trống | Chọn đúng tháng/năm giao dịch hoặc để ứng dụng chọn tháng có giao dịch gần nhất. |
+
+## 12. Bảo mật và đóng góp
+
+- Không sửa, in hoặc commit `.env` và `frontend/.env.local`.
+- Không log token, cookie, password, AWS access key, Cognito client secret hoặc database password.
+- Không commit output `.serverless`; Serverless sẽ tạo lại khi cần.
+- Trước khi merge/push, chạy build, test phù hợp, syntax check và `git diff --check`.
+- Không deploy AWS từ local trừ khi công việc đã được ủy quyền riêng.

@@ -78,5 +78,134 @@
   .table-row {
     @apply border-b border-slate-100 transition duration-200 hover:bg-emerald-50/70 dark:border-slate-800 dark:hover:bg-slate-800/80;
   }
+
+  .notification-item {
+    @apply border-b p-4 transition duration-200 dark:border-slate-800;
+  }
+
+  .notification-item-read {
+    @apply opacity-70;
+  }
+
+  .notification-item-danger {
+    @apply border-rose-100 bg-rose-50 dark:border-rose-950/70 dark:bg-rose-950/30;
+  }
+
+  .notification-item-warning {
+    @apply border-amber-100 bg-amber-50 dark:border-amber-950/70 dark:bg-amber-950/30;
+  }
+
+  .notification-item-success {
+    @apply border-emerald-100 bg-emerald-50 dark:border-emerald-950/70 dark:bg-emerald-950/30;
+  }
+
+  .notification-dot {
+    @apply h-2.5 w-2.5 shrink-0 rounded-full;
+  }
+
+  .notification-dot-danger { @apply bg-rose-500; }
+  .notification-dot-warning { @apply bg-amber-500; }
+  .notification-dot-success { @apply bg-emerald-500; }
+
+  .notification-badge {
+    @apply rounded-full px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide;
+  }
+
+  .notification-badge-danger { @apply bg-rose-200 text-rose-800 dark:bg-rose-900/70 dark:text-rose-100; }
+  .notification-badge-warning { @apply bg-amber-200 text-amber-800 dark:bg-amber-900/70 dark:text-amber-100; }
+  .notification-badge-success { @apply bg-emerald-200 text-emerald-800 dark:bg-emerald-900/70 dark:text-emerald-100; }
+
+  .notification-title-danger { @apply text-rose-900 dark:text-rose-100; }
+  .notification-title-warning { @apply text-amber-900 dark:text-amber-100; }
+  .notification-title-success { @apply text-emerald-900 dark:text-emerald-100; }
+
+  .upload-dropzone {
+    @apply rounded-lg border-2 border-dashed p-4 text-center transition duration-300 sm:p-6;
+  }
+
+  .upload-dropzone-picker {
+    @apply flex min-h-[360px] cursor-pointer flex-col items-center justify-center rounded-lg p-8 text-center;
+  }
+
+  .upload-dropzone-picker-selected {
+    @apply min-h-0 p-3 sm:p-4;
+  }
+
+  .upload-file-preview {
+    @apply mt-3 flex w-full flex-col gap-3 rounded-xl border border-slate-200 bg-slate-100 p-3 text-left shadow-sm dark:border-slate-700 dark:bg-slate-950/60;
+  }
+
+  .upload-image-preview-trigger {
+    @apply relative block w-full cursor-zoom-in overflow-hidden rounded-xl border border-slate-300 bg-slate-950 p-3 text-left shadow-inner transition duration-200 hover:border-emerald-400 focus:outline-none focus:ring-4 focus:ring-emerald-300 dark:border-slate-700 dark:hover:border-emerald-500 dark:focus:ring-emerald-900;
+  }
+
+  .upload-image-preview {
+    @apply block w-full rounded-lg object-contain;
+    height: auto;
+    max-height: 380px;
+  }
+
+  .upload-image-preview-hint {
+    @apply pointer-events-none absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full bg-slate-950/80 px-3 py-1 text-xs font-semibold text-white shadow-sm;
+  }
+
+  .upload-file-details {
+    @apply min-w-0 px-1 pb-1 text-left;
+  }
+
+  .upload-pdf-preview {
+    @apply flex min-h-36 w-full flex-col items-center justify-center gap-2 rounded-xl border border-rose-100 bg-rose-50 p-4 text-xs font-bold text-rose-700 dark:border-rose-950/60 dark:bg-rose-950/40 dark:text-rose-200;
+  }
+
+  .upload-preview-modal {
+    @apply fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/85 p-4 backdrop-blur-sm;
+  }
+
+  .upload-preview-modal-content {
+    @apply relative flex w-full max-w-6xl items-center justify-center rounded-2xl border border-slate-700 bg-slate-950 p-4 shadow-2xl;
+    max-height: calc(100vh - 2rem);
+  }
+
+  .upload-preview-modal-image {
+    @apply block max-w-full rounded-xl object-contain;
+    max-height: calc(100vh - 5rem);
+  }
+
+  .upload-preview-modal-close {
+    @apply absolute right-3 top-3 z-10 inline-flex h-10 w-10 items-center justify-center rounded-full border border-slate-600 bg-slate-900/90 text-white shadow-lg transition hover:bg-slate-800 focus:outline-none focus:ring-4 focus:ring-emerald-400;
+  }
+
+  @media (max-width: 640px) {
+    .upload-dropzone {
+      padding: 0.75rem;
+    }
+
+    .upload-dropzone-picker {
+      min-height: 300px;
+      padding: 1.25rem;
+    }
+
+    .upload-dropzone-picker-selected {
+      min-height: 0;
+      padding: 0.75rem;
+    }
+
+    .upload-image-preview {
+      max-height: min(62vh, 380px);
+    }
+
+    .upload-preview-modal {
+      padding: 0.75rem;
+    }
+
+    .upload-preview-modal-content {
+      border-radius: 0.75rem;
+      padding: 0.75rem;
+    }
+
+    .upload-preview-modal-image {
+      max-height: calc(100vh - 4rem);
+    }
+  }
 }
 

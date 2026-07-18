@@ -1,4 +1,4 @@
-import { AlertCircle, Check, CloudUpload, FileImage, Loader2, RefreshCw, UploadCloud, X } from "lucide-react";
+import { AlertCircle, Check, CloudUpload, FileImage, FileText, Loader2, RefreshCw, UploadCloud, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ApiError,
@@ -10,6 +10,7 @@ import {
   uploadInvoiceFile,
 } from "../services/api.js";
 import { useLanguage } from "../i18n/LanguageContext.jsx";
+import { createImagePreview, getFileExtension, isPreviewableImage } from "../utils/uploadPreview.js";
 
 const stepKeys = [
   "upload.steps.uploading",
@@ -56,11 +57,6 @@ function formatFileSize(size) {
   if (!Number.isFinite(size)) return "";
   if (size < 1024 * 1024) return `${Math.round(size / 1024)} KB`;
   return `${(size / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function getFileExtension(fileName = "") {
-  const dotIndex = fileName.lastIndexOf(".");
-  return dotIndex >= 0 ? fileName.slice(dotIndex).toLowerCase() : "";
 }
 
 function isSupportedFile(file) {
@@ -157,7 +153,10 @@ export default function UploadInvoice({ onNavigate, onAnalysisComplete }) {
   const { t } = useLanguage();
   const inputRef = useRef(null);
   const pollingControllerRef = useRef(null);
+  const previewTriggerRef = useRef(null);
   const [selectedFile, setSelectedFile] = useState(null);
+  const [previewUrl, setPreviewUrl] = useState(null);
+  const [isPreviewOpen, setIsPreviewOpen] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [stepIndex, setStepIndex] = useState(-1);
@@ -179,6 +178,31 @@ export default function UploadInvoice({ onNavigate, onAnalysisComplete }) {
   }, [isComplete, pipelineStatus?.progress, stepIndex, steps.length]);
 
   useEffect(() => () => pollingControllerRef.current?.abort(), []);
+  useEffect(() => {
+    if (!isPreviewableImage(selectedFile)) {
+      setPreviewUrl(null);
+      return undefined;
+    }
+
+    const preview = createImagePreview(selectedFile);
+    setPreviewUrl(preview.url);
+    return preview.revoke;
+  }, [selectedFile]);
+
+  useEffect(() => {
+    if (!isPreviewOpen) return undefined;
+
+    const handleKeyDown = (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setIsPreviewOpen(false);
+        window.requestAnimationFrame(() => previewTriggerRef.current?.focus());
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isPreviewOpen]);
 
   function applyPipelineStatus(statusData = {}) {
     setPipelineStatus(statusData);
@@ -258,6 +282,7 @@ export default function UploadInvoice({ onNavigate, onAnalysisComplete }) {
 
   function resetWorkflowState({ keepSelectedFile = false } = {}) {
     pollingControllerRef.current?.abort();
+  setIsPreviewOpen(false);
     if (!keepSelectedFile) {
       setSelectedFile(null);
     }
@@ -469,6 +494,11 @@ export default function UploadInvoice({ onNavigate, onAnalysisComplete }) {
     resetFileInput();
   }
 
+  function closePreview() {
+    setIsPreviewOpen(false);
+    window.requestAnimationFrame(() => previewTriggerRef.current?.focus());
+  }
+
   return (
     <div className="grid gap-6 xl:grid-cols-[1fr_420px]">
       <section className="app-card p-6">
@@ -482,49 +512,99 @@ export default function UploadInvoice({ onNavigate, onAnalysisComplete }) {
           </p>
         </div>
 
-        <label
+        <div
           onDragOver={(event) => {
             event.preventDefault();
             setIsDragging(true);
           }}
           onDragLeave={() => setIsDragging(false)}
           onDrop={handleDrop}
-          className={`flex min-h-[360px] cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed p-8 text-center transition duration-300 ${
+          className={`upload-dropzone ${
             isDragging
               ? "border-emerald-500 bg-emerald-50 dark:bg-emerald-950/40"
               : "border-slate-200 bg-slate-50 hover:border-emerald-400 hover:bg-emerald-50/60 dark:border-slate-800 dark:bg-slate-900 dark:hover:border-emerald-700 dark:hover:bg-emerald-950/30"
           }`}
         >
-          <input
-            ref={inputRef}
-            type="file"
-            className="sr-only"
-            accept=".png,.jpg,.jpeg,.heic,.pdf,image/png,image/jpeg,image/heic,application/pdf"
-            onChange={(event) => {
-              const [file] = event.target.files;
-              handleSelectedFile(file);
-            }}
-          />
-          <span className="flex h-16 w-16 items-center justify-center rounded-lg bg-white text-emerald-600 shadow-sm dark:bg-slate-950 dark:text-emerald-300">
-            <CloudUpload className="h-8 w-8" />
-          </span>
-          <span className="mt-5 text-lg font-bold text-slate-950 dark:text-white">
-            {t("upload.uploadDrop")}
-          </span>
-          <span className="mt-2 text-sm text-slate-500 dark:text-slate-400">
-            {t("upload.fileHint")}
-          </span>
-          <span className="mt-4 inline-flex items-center justify-center rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm dark:border-slate-800 dark:bg-slate-950 dark:text-slate-200">
-            {t("upload.chooseFile")}
-          </span>
+          <label
+            htmlFor="invoice-file-input"
+            className={`upload-dropzone-picker ${selectedFile ? "upload-dropzone-picker-selected" : ""}`}
+          >
+            <input
+              ref={inputRef}
+              id="invoice-file-input"
+              type="file"
+              className="sr-only"
+              accept=".png,.jpg,.jpeg,.heic,.pdf,image/png,image/jpeg,image/heic,application/pdf"
+              onChange={(event) => {
+                const [file] = event.target.files;
+                handleSelectedFile(file);
+              }}
+            />
+            {selectedFile ? (
+              <>
+                <span className="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm dark:border-slate-800 dark:bg-slate-950 dark:text-slate-200">
+                  <CloudUpload className="h-4 w-4 text-emerald-600 dark:text-emerald-300" />
+                  {t("upload.chooseFile")}
+                </span>
+                <span className="mt-2 text-xs text-slate-500 dark:text-slate-400">
+                  {t("upload.fileHint")}
+                </span>
+              </>
+            ) : (
+              <>
+                <span className="flex h-16 w-16 items-center justify-center rounded-lg bg-white text-emerald-600 shadow-sm dark:bg-slate-950 dark:text-emerald-300">
+                  <CloudUpload className="h-8 w-8" />
+                </span>
+                <span className="mt-5 text-lg font-bold text-slate-950 dark:text-white">
+                  {t("upload.uploadDrop")}
+                </span>
+                <span className="mt-2 text-sm text-slate-500 dark:text-slate-400">
+                  {t("upload.fileHint")}
+                </span>
+                <span className="mt-4 inline-flex items-center justify-center rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm dark:border-slate-800 dark:bg-slate-950 dark:text-slate-200">
+                  {t("upload.chooseFile")}
+                </span>
+              </>
+            )}
+          </label>
+
           {selectedFile && (
-            <span className="mt-6 inline-flex max-w-full items-center gap-2 rounded-lg bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-sm dark:bg-slate-800 dark:text-slate-200">
-              <FileImage className="h-4 w-4 shrink-0 text-emerald-600" />
-              <span className="truncate">{selectedFile.name}</span>
-              <span className="shrink-0 text-xs text-slate-400">{formatFileSize(selectedFile.size)}</span>
-            </span>
+            <div className="upload-file-preview">
+              {isPreviewableImage(selectedFile) ? (
+                previewUrl && (
+                  <button
+                    ref={previewTriggerRef}
+                    type="button"
+                    className="upload-image-preview-trigger"
+                    onClick={() => setIsPreviewOpen(true)}
+                    aria-label={t("upload.openPreview", { fileName: selectedFile.name })}
+                  >
+                    <img
+                      className="upload-image-preview"
+                      src={previewUrl}
+                      alt={t("upload.previewAlt", { fileName: selectedFile.name })}
+                    />
+                    <span className="upload-image-preview-hint">{t("upload.openPreviewHint")}</span>
+                  </button>
+                )
+              ) : (
+                <div className="upload-pdf-preview">
+                  <FileText className="h-9 w-9" />
+                  <span>{t("upload.pdfPreview")}</span>
+                </div>
+              )}
+              <div className="upload-file-details">
+                <div className="flex min-w-0 items-center gap-2">
+                  {isPreviewableImage(selectedFile)
+                    ? <FileImage className="h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-300" />
+                    : <FileText className="h-4 w-4 shrink-0 text-rose-600 dark:text-rose-300" />}
+                  <span className="truncate text-sm font-semibold text-slate-700 dark:text-slate-200">{selectedFile.name}</span>
+                </div>
+                <span className="text-xs text-slate-400">{formatFileSize(selectedFile.size)}</span>
+              </div>
+            </div>
           )}
-        </label>
+        </div>
 
         {error && (
           <div className="mt-4 flex items-start gap-2 rounded-lg border border-rose-100 bg-rose-50 p-3 text-sm font-semibold text-rose-700 dark:border-rose-900 dark:bg-rose-950/40 dark:text-rose-300">
@@ -635,6 +715,33 @@ export default function UploadInvoice({ onNavigate, onAnalysisComplete }) {
           </section>
         )}
       </aside>
+
+      {isPreviewOpen && previewUrl && (
+        <div className="upload-preview-modal" onClick={closePreview}>
+          <div
+            className="upload-preview-modal-content"
+            role="dialog"
+            aria-modal="true"
+            aria-label={t("upload.openPreview", { fileName: selectedFile?.name || "" })}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <button
+              type="button"
+              className="upload-preview-modal-close"
+              onClick={closePreview}
+              aria-label={t("upload.closePreview")}
+              autoFocus
+            >
+              <X className="h-5 w-5" />
+            </button>
+            <img
+              className="upload-preview-modal-image"
+              src={previewUrl}
+              alt={t("upload.previewAlt", { fileName: selectedFile?.name || "" })}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }

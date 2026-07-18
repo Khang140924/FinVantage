@@ -9,7 +9,6 @@ function formatDate(value) {
   const date = new Date(`${String(value).slice(0, 10)}T00:00:00`);
   return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleDateString("vi-VN");
 }
-
 export default function GlobalSearch({ value, onChange, onNavigate }) {
   const { t } = useLanguage();
   const containerRef = useRef(null);

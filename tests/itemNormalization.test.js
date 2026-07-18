@@ -7,7 +7,6 @@ const field = (type, value, confidence = 99) => ({
   Type: { Text: type },
   ValueDetection: { Text: value, Confidence: confidence },
 });
-
 test('normalizes the known Vinamilk OCR phrase without changing its amount or raw OCR', () => {
   const expenseDocuments = [{
     Blocks: [{ BlockType: 'LINE', Text: 'Sun tural Vinamilk IL 28,500' }],
