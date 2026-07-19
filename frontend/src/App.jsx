@@ -11,6 +11,7 @@ import { useLanguage } from "./i18n/LanguageContext.jsx";
 import { useAuth } from "./context/AuthContext.jsx";
 import {
   createAvatarUpload,
+  createInvoice,
   getBudgets,
   getDashboardSummary,
   getInvoices,
@@ -182,6 +183,55 @@ export default function App() {
     window.history.pushState({}, "", routePath(pageId, invoiceId));
   }, []);
 
+  const handleCreateInvoice = useCallback(async (invoiceData) => {
+  try {
+    const invoice = await createInvoice(invoiceData);
+
+    if (invoice) {
+      setInvoices((current) => [
+        invoice,
+        ...current,
+      ]);
+    }
+
+    await refreshFinanceData();
+
+    return invoice;
+
+  } catch (error) {
+    setApiStatus((current) => ({
+      ...current,
+      error: error.message || "Failed to create invoice.",
+    }));
+
+    throw error;
+  }
+}, [refreshFinanceData]);
+
+const handleCreateInvoice = useCallback(async (invoiceData) => {
+  try {
+    const result = await createInvoice(invoiceData);
+
+    if (result.invoice) {
+      setInvoices((current) => [
+        result.invoice,
+        ...current
+      ]);
+    }
+
+    await refreshFinanceData();
+
+    return result.invoice;
+  } catch(error) {
+    setApiStatus((current)=>({
+      ...current,
+      error:error.message
+    }));
+
+    throw error;
+  }
+}, [refreshFinanceData]);
+
   const handleAnalysisComplete = useCallback(
     (payload) => {
       const invoiceId = String(payload?.invoice?.id || payload?.invoiceId || payload?.upload?.invoiceId || "");
@@ -228,7 +278,13 @@ export default function App() {
   const page = useMemo(() => {
     switch (activePage) {
       case "upload":
-        return <UploadInvoice onNavigate={navigate} onAnalysisComplete={handleAnalysisComplete} />;
+  return (
+    <UploadInvoice
+      onNavigate={navigate}
+      onAnalysisComplete={handleAnalysisComplete}
+      onCreateInvoice={handleCreateInvoice}
+    />
+  );
       case "analysis":
         return <AnalysisResult invoiceId={activeInvoiceId} initialAnalysis={latestAnalysis?.invoiceId === activeInvoiceId ? latestAnalysis : null} />;
       case "transactions":
@@ -250,8 +306,27 @@ export default function App() {
           />
         );
     }
-  }, [account, activeInvoiceId, activePage, apiStatus, budgetData, changeDashboardMonth, dashboardSummary, handleAnalysisComplete, invoices, latestAnalysis, navigate, refreshFinanceAndNotifications, refreshFinanceData, savePreferences, saveProfile, searchQuery, settingsSection, uploadAvatar]);
-
+    }, [
+    account,
+    activeInvoiceId,
+    activePage,
+    apiStatus,
+    budgetData,
+    changeDashboardMonth,
+    dashboardSummary,
+    handleAnalysisComplete,
+    handleCreateInvoice,
+    invoices,
+    latestAnalysis,
+    navigate,
+    refreshFinanceAndNotifications,
+    refreshFinanceData,
+    savePreferences,
+    saveProfile,
+    searchQuery,
+    settingsSection,
+    uploadAvatar
+  ]);
   const pageTitles = useMemo(
     () => ({
       dashboard: t("nav.dashboard"),

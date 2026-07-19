@@ -142,6 +142,61 @@ export const saveParsedInvoice = async (invoiceData) => {
   }
 };
 
+export const createInvoiceRecord = async (invoiceData = {}) => {
+  const invoice = normalizeInvoiceInput({
+    ...invoiceData,
+    status: invoiceData.status || "ANALYZED"
+  });
+
+  const query = `
+    INSERT INTO invoices (
+      user_id,
+      store_name,
+      total_amount,
+      currency,
+      category,
+      ai_advice,
+      raw_text,
+      source_file_key,
+      line_items,
+      status,
+      transaction_date,
+      payment_method,
+      notes,
+      source
+    )
+    VALUES (
+      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14
+    )
+    RETURNING *
+  `;
+
+  const values = [
+    invoice.userId,
+    invoice.storeName,
+    invoice.totalAmount,
+    invoice.currency,
+    invoice.category,
+    invoice.aiAdvice,
+    invoice.rawText,
+    invoice.sourceFileKey,
+    JSON.stringify(invoice.lineItems),
+    invoice.status,
+    invoice.transactionDate,
+    invoiceData.paymentMethod || null,
+    invoiceData.notes || null,
+    invoiceData.source || "MANUAL"
+  ];
+
+  try {
+    const result = await pgPool.query(query, values);
+    return result.rows[0];
+  } catch (error) {
+    console.error("Failed to create invoice:", error);
+    throw error;
+  }
+};
+
 export const getInvoicesByUser = async (userId) => {
   if (!userId) {
     throw new Error('userId is required to get invoices.');

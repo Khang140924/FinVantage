@@ -1,4 +1,5 @@
 import {
+  createInvoiceRecord,
   deleteInvoiceById,
   evaluateBudgetNotifications,
   getDashboardSummary,
@@ -44,6 +45,74 @@ export const listInvoices = async (event = {}) => {
   } catch (error) {
     logger.error('Failed to fetch invoices', error, { userId });
     return response.serverError(`Không thể lấy danh sách hóa đơn: ${error.message}`);
+  }
+};
+
+export const createInvoice = async (event = {}) => {
+  const auth = await requireAuth(event);
+  if (auth.error) return auth.error;
+
+  let body;
+
+  try {
+    body = typeof event.body === "string"
+      ? JSON.parse(event.body)
+      : event.body || {};
+  } catch {
+    return response.badRequest("Request body phải là JSON hợp lệ.");
+  }
+
+  const {
+    storeName,
+    totalAmount,
+    category,
+    paymentMethod,
+    transactionDate,
+    notes,
+    source
+  } = body;
+
+
+  if (!storeName) {
+    return response.badRequest("Thiếu tên cửa hàng.");
+  }
+
+
+  if (!Number.isFinite(Number(totalAmount)) || Number(totalAmount) < 0) {
+    return response.badRequest("Số tiền không hợp lệ.");
+  }
+
+
+  try {
+
+    const invoice = await createInvoiceRecord({
+      userId: auth.user.sub,
+      storeName,
+      totalAmount: Number(totalAmount),
+      category,
+      paymentMethod,
+      transactionDate,
+      notes,
+      source: source || "MANUAL",
+      status:"ANALYZED"
+    });
+
+
+    return response.success({
+      invoice
+    });
+
+  } catch(error){
+
+    logger.error(
+      "Failed to create manual invoice",
+      error,
+      {userId:auth.user.sub}
+    );
+
+    return response.serverError(
+      "Không thể tạo giao dịch."
+    );
   }
 };
 
@@ -240,3 +309,4 @@ export const deleteInvoice = async (event = {}) => {
     return response.serverError(`Không thể xóa hóa đơn: ${error.message}`);
   }
 };
+
