@@ -275,3 +275,13 @@ export function markAllNotificationsRead() {
 export function deleteNotification(notificationId) {
   return apiRequest(`/notifications/${encodeURIComponent(notificationId)}`, { method: "DELETE" });
 }
+
+export function createInvoice(data) {
+  return apiRequest("/invoices", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(data),
+  });
+}
