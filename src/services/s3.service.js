@@ -7,15 +7,8 @@ export const s3Client = new S3Client({
   region: process.env.AWS_REGION || process.env.AWS_REGION_NAME || 'ap-southeast-1'
 });
 
-/**
- * Sinh ra một presigned URL (đường dẫn liên kết được ký trước) để tải tệp lên trực tiếp từ frontend
- * @param {string} fileName - Tên của tệp tin hóa đơn
- * @param {string} contentType - Kiểu nội dung của tệp tin (ví dụ: application/pdf, image/png)
- * @returns {Promise<{uploadUrl: string, fileKey: string, invoiceId: string, cacheKey: string}>} - Trả về đường dẫn tải lên và thông tin OCR cache
- */
-export const generateUploadUrl = async (fileName, contentType, { userId, contentSha256 } = {}) => {
-  // Tạo unique file key (khóa tệp duy nhất) và lưu trong thư mục uploads/ để kích hoạt S3 trigger
-  const cleanFileName = fileName.replace(/\s+/g, '_'); // Thay thế khoảng trắng bằng dấu gạch dưới
+export const buildInvoiceUploadIdentity = (fileName, { userId, contentSha256 } = {}) => {
+  const cleanFileName = String(fileName || '').replace(/\s+/g, '_');
   const safeUserId = String(userId || 'anonymous').replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 100);
   const stablePart = /^[a-f0-9]{64}$/i.test(contentSha256 || '')
     ? String(contentSha256).toLowerCase()
@@ -23,22 +16,38 @@ export const generateUploadUrl = async (fileName, contentType, { userId, content
   const fileKey = `uploads/${safeUserId}/${stablePart}_${cleanFileName.slice(-120)}`;
   const bucketName = process.env.S3_RAW_BUCKET_NAME || process.env.S3_BUCKET_NAME || 'finvantage-raw-invoices-dev';
   const { invoiceId, cacheKey } = getInvoiceUploadIdentity(fileKey);
+  return { bucketName, fileKey, invoiceId, cacheKey };
+};
 
-  // Khởi tạo PutObjectCommand (lệnh ghi đối tượng)
+export const signInvoiceUploadUrl = async (
+  identity,
+  contentType,
+  { fileSize = null, signer = getSignedUrl, client = s3Client } = {}
+) => {
   const command = new PutObjectCommand({
-    Bucket: bucketName,
-    Key: fileKey,
-    ContentType: contentType
+    Bucket: identity.bucketName,
+    Key: identity.fileKey,
+    ContentType: contentType,
+    ...(Number.isSafeInteger(fileSize) && fileSize > 0 ? { ContentLength: fileSize } : {})
   });
+  return signer(client, command, { expiresIn: 300 });
+};
 
-  // Tạo presigned URL (đường dẫn liên kết được ký trước) có hiệu lực trong 300 giây (5 phút)
-  const uploadUrl = await getSignedUrl(s3Client, command, { expiresIn: 300 });
+/**
+ * Sinh ra một presigned URL (đường dẫn liên kết được ký trước) để tải tệp lên trực tiếp từ frontend
+ * @param {string} fileName - Tên của tệp tin hóa đơn
+ * @param {string} contentType - Kiểu nội dung của tệp tin (ví dụ: application/pdf, image/png)
+ * @returns {Promise<{uploadUrl: string, fileKey: string, invoiceId: string, cacheKey: string}>} - Trả về đường dẫn tải lên và thông tin OCR cache
+ */
+export const generateUploadUrl = async (fileName, contentType, { userId, contentSha256, fileSize } = {}) => {
+  const identity = buildInvoiceUploadIdentity(fileName, { userId, contentSha256 });
+  const uploadUrl = await signInvoiceUploadUrl(identity, contentType, { fileSize });
 
   return {
     uploadUrl,
-    fileKey,
-    invoiceId,
-    cacheKey
+    fileKey: identity.fileKey,
+    invoiceId: identity.invoiceId,
+    cacheKey: identity.cacheKey
   };
 };
 

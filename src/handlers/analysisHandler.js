@@ -14,6 +14,7 @@ import * as response from '../utils/response.js';
 import { logger } from '../utils/logger.js';
 import { assertValidOcrPayload, OcrResultError } from '../utils/textractExpense.js';
 import { requireAuth } from '../utils/cognitoAuth.js';
+import { classifyAwsError, sanitizedAwsLogError } from '../utils/awsError.js';
 
 const parseBody = (event) => {
   if (!event?.body) return {};
@@ -249,10 +250,13 @@ export const handler = async (event = {}) => {
     });
   } catch (error) {
     const sourceFileKey = getSourceFileKey(cachedInvoice);
+    const awsFailure = classifyAwsError(error);
+    const failureCode = awsFailure?.code || 'ANALYSIS_FAILED';
+    const failureMessage = awsFailure?.message || 'Không thể phân tích và lưu hóa đơn.';
     try {
       await cacheProcessingStatus('ANALYSIS_FAILED', {
-        errorCode: 'ANALYSIS_FAILED',
-        errorMessage: error.message
+        errorCode: failureCode,
+        errorMessage: failureMessage
       });
     } catch (cacheError) {
       logger.warn('Could not cache ANALYSIS_FAILED status', {
@@ -261,19 +265,20 @@ export const handler = async (event = {}) => {
         error: cacheError.message
       });
     }
-    logger.error('Invoice analysis failed', error, {
+    logger.error('Invoice analysis failed', sanitizedAwsLogError(error, awsFailure), {
       invoiceId,
       fileKey: sourceFileKey,
       userId,
       status: 'ANALYSIS_FAILED'
     });
-    await notifyFailure(`Không thể phân tích hóa đơn: ${error.message}`, 'ANALYSIS_FAILED');
-    return response.sendResponse(500, {
-      error: 'Invoice analysis failed',
-      code: 'ANALYSIS_FAILED',
-      message: `Không thể phân tích và lưu hóa đơn: ${error.message}`,
+    await notifyFailure(failureMessage, failureCode);
+    return response.sendResponse(awsFailure?.statusCode || 500, {
+      error: awsFailure?.error || 'Invoice analysis failed',
+      code: failureCode,
+      message: failureMessage,
       invoiceId,
-      status: 'ANALYSIS_FAILED'
+      status: 'ANALYSIS_FAILED',
+      retryable: awsFailure?.retryable ?? false
     });
   }
 };

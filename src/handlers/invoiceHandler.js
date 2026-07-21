@@ -13,14 +13,22 @@ import * as response from '../utils/response.js';
 import { logger } from '../utils/logger.js';
 import { requireAuth } from '../utils/cognitoAuth.js';
 import { buildOcrCacheKey } from '../utils/invoice.js';
+import { resolvePipelineProgress } from '../utils/invoicePipeline.js';
+import {
+  validateIdempotencyKey,
+  validateTransactionCreate,
+  validateTransactionUpdate
+} from '../utils/transactionValidation.js';
 
-const PIPELINE_PROGRESS = {
-  UPLOADED: 25,
-  OCR_PROCESSING: 35,
-  OCR_FAILED: 50,
-  ANALYZING: 75,
-  ANALYZED: 100,
-  ANALYSIS_FAILED: 75
+const parseJsonBody = (event = {}) => {
+  if (!event.body) return {};
+  return typeof event.body === 'string' ? JSON.parse(event.body) : event.body;
+};
+
+const getHeader = (event, expectedName) => {
+  const entry = Object.entries(event.headers || {})
+    .find(([name]) => name.toLowerCase() === expectedName.toLowerCase());
+  return entry?.[1];
 };
 
 const ownsCachedInvoice = (cachedInvoice, invoiceId, userId) => {
@@ -44,7 +52,10 @@ export const listInvoices = async (event = {}) => {
     });
   } catch (error) {
     logger.error('Failed to fetch invoices', error, { userId });
-    return response.serverError(`Không thể lấy danh sách hóa đơn: ${error.message}`);
+    return response.serverError(
+      'Không thể lấy danh sách giao dịch lúc này.',
+      'LIST_INVOICES_FAILED'
+    );
   }
 };
 
@@ -53,65 +64,51 @@ export const createInvoice = async (event = {}) => {
   if (auth.error) return auth.error;
 
   let body;
-
   try {
-    body = typeof event.body === "string"
-      ? JSON.parse(event.body)
-      : event.body || {};
+    body = parseJsonBody(event);
   } catch {
-    return response.badRequest("Request body phải là JSON hợp lệ.");
+    return response.badRequest(
+      'Request body phải là JSON hợp lệ.',
+      'INVALID_JSON_BODY'
+    );
   }
 
-  const {
-    storeName,
-    totalAmount,
-    category,
-    paymentMethod,
-    transactionDate,
-    notes,
-    source
-  } = body;
-
-
-  if (!storeName) {
-    return response.badRequest("Thiếu tên cửa hàng.");
+  const validation = validateTransactionCreate(body);
+  if (!validation.valid) {
+    return response.badRequest(validation.message, validation.code);
   }
-
-
-  if (!Number.isFinite(Number(totalAmount)) || Number(totalAmount) < 0) {
-    return response.badRequest("Số tiền không hợp lệ.");
+  const idempotency = validateIdempotencyKey(getHeader(event, 'Idempotency-Key'));
+  if (!idempotency.valid) {
+    return response.badRequest(idempotency.message, idempotency.code);
   }
-
 
   try {
-
-    const invoice = await createInvoiceRecord({
+    const result = await createInvoiceRecord({
       userId: auth.user.sub,
-      storeName,
-      totalAmount: Number(totalAmount),
-      category,
-      paymentMethod,
-      transactionDate,
-      notes,
-      source: source || "MANUAL",
-      status:"ANALYZED"
+      ...validation.value,
+      idempotencyKey: idempotency.value
     });
 
+    try {
+      await evaluateBudgetNotifications(auth.user.sub, result.invoice.category);
+    } catch (notificationError) {
+      logger.warn('Budget notification evaluation failed after invoice create', {
+        invoiceId: result.invoice.id,
+        userId: auth.user.sub,
+        error: notificationError.message
+      });
+    }
 
-    return response.success({
-      invoice
-    });
-
-  } catch(error){
-
-    logger.error(
-      "Failed to create manual invoice",
-      error,
-      {userId:auth.user.sub}
-    );
-
+    const payload = {
+      invoice: result.invoice,
+      idempotentReplay: !result.created
+    };
+    return result.created ? response.created(payload) : response.success(payload);
+  } catch (error) {
+    logger.error('Failed to create manual invoice', error, { userId: auth.user.sub });
     return response.serverError(
-      "Không thể tạo giao dịch."
+      'Không thể tạo giao dịch lúc này.',
+      'CREATE_INVOICE_FAILED'
     );
   }
 };
@@ -135,7 +132,10 @@ export const dashboardSummary = async (event = {}) => {
     });
   } catch (error) {
     logger.error('Failed to fetch dashboard summary', error, { userId });
-    return response.serverError(`Không thể lấy tổng quan dashboard: ${error.message}`);
+    return response.serverError(
+      'Không thể lấy tổng quan dashboard lúc này.',
+      'DASHBOARD_SUMMARY_FAILED'
+    );
   }
 };
 
@@ -172,7 +172,10 @@ export const getInvoice = async (event = {}) => {
     return invoice ? response.success({ invoice }) : response.notFound('Không tìm thấy hóa đơn.');
   } catch (error) {
     logger.error('Failed to fetch invoice detail', error, auth);
-    return response.serverError(`Không thể lấy chi tiết hóa đơn: ${error.message}`);
+    return response.serverError(
+      'Không thể lấy chi tiết giao dịch lúc này.',
+      'GET_INVOICE_FAILED'
+    );
   }
 };
 
@@ -191,9 +194,7 @@ export const getInvoiceStatus = async (event = {}) => {
       const ocrReady = status === 'OCR_PROCESSING'
         && Boolean(String(cachedInvoice.rawText || cachedInvoice.raw_text || '').trim())
         && Number(cachedInvoice.totalAmount ?? cachedInvoice.total_amount) > 0;
-      const progress = Number.isFinite(Number(cachedInvoice.progress)) && Number(cachedInvoice.progress) > 0
-        ? Number(cachedInvoice.progress)
-        : (ocrReady ? 50 : (PIPELINE_PROGRESS[status] ?? 0));
+      const progress = resolvePipelineProgress(cachedInvoice, { ocrReady });
       const failed = status === 'OCR_FAILED' || status === 'ANALYSIS_FAILED';
       return response.success({
         invoiceId: auth.invoiceId,
@@ -225,50 +226,61 @@ export const getInvoiceStatus = async (event = {}) => {
 export const updateInvoice = async (event = {}) => {
   const auth = await authenticateInvoiceRequest(event);
   if (auth.error) return auth.error;
-  if (!auth.invoiceId) return response.badRequest('Thiếu invoice id.');
+  if (!auth.invoiceId) {
+    return response.badRequest('Thiếu invoice id.', 'INVOICE_ID_REQUIRED');
+  }
 
   let body;
   try {
-    body = typeof event.body === 'string' ? JSON.parse(event.body) : (event.body || {});
+    body = parseJsonBody(event);
   } catch {
-    return response.badRequest('Request body phải là JSON hợp lệ.');
+    return response.badRequest(
+      'Request body phải là JSON hợp lệ.',
+      'INVALID_JSON_BODY'
+    );
   }
 
-  const totalAmount = body.totalAmount ?? body.total_amount;
-  if (totalAmount !== undefined && (!Number.isFinite(Number(totalAmount)) || Number(totalAmount) < 0)) {
-    return response.badRequest('Số tiền phải là số không âm.');
+  const validation = validateTransactionUpdate(body);
+  if (!validation.valid) {
+    return response.badRequest(validation.message, validation.code);
   }
-
-  const changes = {
-    storeName: body.storeName ?? body.store_name,
-    totalAmount: totalAmount === undefined ? undefined : Number(totalAmount),
-    category: body.category,
-    status: body.status,
-    transactionDate: body.transactionDate ?? body.transaction_date,
-    aiAdvice: body.aiAdvice ?? body.ai_advice
-  };
+  const changes = { ...validation.value };
 
   try {
     const requestedLineItems = body.lineItems ?? body.line_items;
     if (requestedLineItems !== undefined) {
       if (!Array.isArray(requestedLineItems) || requestedLineItems.length > 200) {
-        return response.badRequest('lineItems phải là mảng tối đa 200 món.');
+        return response.badRequest(
+          'lineItems phải là mảng tối đa 200 món.',
+          'INVALID_LINE_ITEMS'
+        );
       }
       const currentInvoice = await getInvoiceById(auth.invoiceId, auth.userId);
-      if (!currentInvoice) return response.notFound('Không tìm thấy hóa đơn.');
+      if (!currentInvoice) {
+        return response.notFound('Không tìm thấy giao dịch.', 'INVOICE_NOT_FOUND');
+      }
       const currentLineItems = Array.isArray(currentInvoice.line_items) ? currentInvoice.line_items : [];
       if (requestedLineItems.length !== currentLineItems.length) {
-        return response.badRequest('Không được thay đổi số lượng line item khi sửa tên món.');
+        return response.badRequest(
+          'Không được thay đổi số lượng line item khi sửa tên món.',
+          'LINE_ITEM_COUNT_MISMATCH'
+        );
       }
       const verifiedIndexes = new Set(body.verifiedLineItemIndexes || body.verified_line_item_indexes || []);
       if ([...verifiedIndexes].some((index) => !Number.isInteger(index) || index < 0 || index >= currentLineItems.length)) {
-        return response.badRequest('Chỉ số line item cần xác nhận không hợp lệ.');
+        return response.badRequest(
+          'Chỉ số line item cần xác nhận không hợp lệ.',
+          'INVALID_LINE_ITEM_INDEX'
+        );
       }
       const normalizedNames = requestedLineItems.map((item) => String(
         item?.normalized_item_name ?? item?.normalizedItemName ?? item?.item ?? ''
       ).normalize('NFC').replace(/\s+/g, ' ').trim());
       if (normalizedNames.some((name) => !name || name.length > 255)) {
-        return response.badRequest('Tên món phải từ 1 đến 255 ký tự.');
+        return response.badRequest(
+          'Tên món phải từ 1 đến 255 ký tự.',
+          'INVALID_LINE_ITEM_NAME'
+        );
       }
       changes.lineItems = currentLineItems.map((item, index) => {
         const verified = verifiedIndexes.has(index);
@@ -282,31 +294,48 @@ export const updateInvoice = async (event = {}) => {
       });
     }
 
+    if (!Object.keys(changes).length) {
+      return response.badRequest(
+        'Cần ít nhất một trường hợp lệ để cập nhật.',
+        'NO_TRANSACTION_CHANGES'
+      );
+    }
+
     const invoice = await updateInvoiceById(auth.invoiceId, auth.userId, changes);
     if (invoice) {
       try { await evaluateBudgetNotifications(auth.userId, invoice.category); }
       catch (notificationError) { logger.warn('Budget notification evaluation failed after invoice update', { invoiceId: auth.invoiceId, error: notificationError.message }); }
     }
-    return invoice ? response.success({ invoice }) : response.notFound('Không tìm thấy hóa đơn.');
+    return invoice
+      ? response.success({ invoice })
+      : response.notFound('Không tìm thấy giao dịch.', 'INVOICE_NOT_FOUND');
   } catch (error) {
     logger.error('Failed to update invoice', error, auth);
-    return response.badRequest(`Không thể cập nhật hóa đơn: ${error.message}`);
+    return response.serverError(
+      'Không thể cập nhật giao dịch lúc này.',
+      'UPDATE_INVOICE_FAILED'
+    );
   }
 };
 
 export const deleteInvoice = async (event = {}) => {
   const auth = await authenticateInvoiceRequest(event);
   if (auth.error) return auth.error;
-  if (!auth.invoiceId) return response.badRequest('Thiếu invoice id.');
+  if (!auth.invoiceId) {
+    return response.badRequest('Thiếu invoice id.', 'INVOICE_ID_REQUIRED');
+  }
 
   try {
     const deleted = await deleteInvoiceById(auth.invoiceId, auth.userId);
     return deleted
       ? response.success({ deletedId: deleted.id })
-      : response.notFound('Không tìm thấy hóa đơn.');
+      : response.notFound('Không tìm thấy giao dịch.', 'INVOICE_NOT_FOUND');
   } catch (error) {
     logger.error('Failed to delete invoice', error, auth);
-    return response.serverError(`Không thể xóa hóa đơn: ${error.message}`);
+    return response.serverError(
+      'Không thể xóa giao dịch lúc này.',
+      'DELETE_INVOICE_FAILED'
+    );
   }
 };
 

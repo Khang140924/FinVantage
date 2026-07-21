@@ -1,5 +1,8 @@
-import 'dotenv/config';
 import assert from 'node:assert/strict';
+import { assertLocalIntegrationEnvironment } from './localIntegrationGuard.js';
+
+if (process.env.FINVANTAGE_DISABLE_DOTENV !== 'true') await import('dotenv/config');
+assertLocalIntegrationEnvironment();
 import { pgPool, searchInvoicesByUser } from '../src/services/db.service.js';
 
 const ownerA = 'search-test-owner-a';

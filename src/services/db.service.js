@@ -1,33 +1,157 @@
 import pg from 'pg';
-import { createClient } from 'redis';
 import { dbConfig } from '../config/db.config.js';
+import { resolveDatabaseCredentials } from './dbSecret.service.js';
 import { enrichStoredLineItems } from '../utils/itemNormalization.js';
+import {
+  createNamespacedRedisClient,
+  REDIS_NAMESPACES
+} from '../../shared/redisClient.js';
+import {
+  EXPENSE_CATEGORY_ALIASES,
+  EXPENSE_CATEGORY_VALUES,
+  normalizeExpenseCategory
+} from '../../shared/expenseCategories.js';
 
 const { Pool } = pg;
 // PostgreSQL DATE has no timezone. Returning it as a string prevents the pg
 // driver from shifting a receipt date by one day during JSON serialization.
 pg.types.setTypeParser(1082, (value) => value);
-const DEFAULT_USER_ID = 'demo-user';
 
-export const pgPool = new Pool({
-  host: dbConfig.host,
-  port: dbConfig.port,
-  database: dbConfig.database,
-  user: dbConfig.user,
-  password: dbConfig.password,
-  ssl: dbConfig.ssl ? { rejectUnauthorized: false } : false
+const sqlStringLiteral = (value) => `'${String(value).replace(/'/g, "''")}'`;
+const CATEGORY_SQL_PAIRS = [
+  ...EXPENSE_CATEGORY_VALUES.map((value) => [value, value]),
+  ...Object.entries(EXPENSE_CATEGORY_ALIASES)
+];
+const canonicalCategorySql = (column) => `CASE
+  ${CATEGORY_SQL_PAIRS.map(([input, canonical]) => (
+    `WHEN LOWER(BTRIM(${column})) = LOWER(${sqlStringLiteral(input)}) THEN ${sqlStringLiteral(canonical)}`
+  )).join('\n  ')}
+  ELSE COALESCE(NULLIF(BTRIM(${column}), ''), 'Khác')
+END`;
+
+const normalizeInvoiceRow = (row) => {
+  if (!row) return null;
+  const { idempotency_key: _privateIdempotencyKey, ...invoice } = row;
+  return {
+    ...invoice,
+    category: normalizeExpenseCategory(invoice.category) || invoice.category || 'Khác',
+    line_items: enrichStoredLineItems(invoice.line_items)
+  };
+};
+
+const safeDatabaseError = (error) => ({
+  name: error?.name || 'DatabaseError',
+  code: error?.code || 'DATABASE_CLIENT_ERROR'
 });
 
-export const redisClient = createClient({
-  url: process.env.REDIS_URL || 'redis://localhost:6379'
-});
+const UNSUPPORTED_PG_STARTUP_ENV = Object.freeze([
+  'PGOPTIONS',
+  'PGREPLICATION',
+  'PGSTATEMENTTIMEOUT',
+  'PGSTATEMENT_TIMEOUT',
+  'PGLOCKTIMEOUT',
+  'PGLOCK_TIMEOUT',
+  'PGIDLE_IN_TRANSACTION_SESSION_TIMEOUT',
+  'PGAPPNAME'
+]);
 
-redisClient.on('error', (err) => console.error('Redis client connection error:', err));
+const removeUnsupportedPgStartupEnvironment = (env = process.env) => {
+  for (const variableName of UNSUPPORTED_PG_STARTUP_ENV) {
+    delete env[variableName];
+  }
+};
+
+const validQueryTimeout = (value) => (
+  Number.isSafeInteger(value) && value > 0 ? value : undefined
+);
+
+export const createRuntimePgPoolOptions = (resolvedConfig = {}) => {
+  const poolConfig = resolvedConfig.pool || {};
+  const queryTimeout = validQueryTimeout(poolConfig.query_timeout);
+  return {
+    host: resolvedConfig.host,
+    port: resolvedConfig.port,
+    database: resolvedConfig.database,
+    user: resolvedConfig.user,
+    password: resolvedConfig.password,
+    ssl: resolvedConfig.ssl,
+    max: poolConfig.max,
+    connectionTimeoutMillis: poolConfig.connectionTimeoutMillis,
+    idleTimeoutMillis: poolConfig.idleTimeoutMillis,
+    ...(queryTimeout === undefined ? {} : { query_timeout: queryTimeout })
+  };
+};
+
+export const createDeferredPgPool = ({
+  baseConfig = dbConfig,
+  resolveConfig = resolveDatabaseCredentials,
+  PoolClass = Pool,
+  logger = console
+} = {}) => {
+  let pool = null;
+  let poolPromise = null;
+  let ended = false;
+
+  const getPool = async () => {
+    if (ended) {
+      const error = new Error('PostgreSQL pool has been closed.');
+      error.code = 'DATABASE_POOL_CLOSED';
+      throw error;
+    }
+    if (pool) return pool;
+    if (!poolPromise) {
+      poolPromise = Promise.resolve(resolveConfig(baseConfig)).then((resolvedConfig) => {
+        // pg reads several startup parameters directly from process.env when
+        // it creates each client lazily. Keep them absent for this runtime so
+        // RDS Proxy only receives the standard user/database StartupMessage.
+        removeUnsupportedPgStartupEnvironment();
+        const createdPool = new PoolClass(createRuntimePgPoolOptions(resolvedConfig));
+        createdPool.on?.('error', (error) => {
+          logger.error?.('Unexpected idle PostgreSQL client error', safeDatabaseError(error));
+        });
+        pool = createdPool;
+        return pool;
+      }).catch((error) => {
+        poolPromise = null;
+        throw error;
+      });
+    }
+    return poolPromise;
+  };
+
+  return {
+    getPool,
+    query: async (...args) => (await getPool()).query(...args),
+    connect: async (...args) => (await getPool()).connect(...args),
+    end: async () => {
+      if (!pool && !poolPromise) {
+        ended = true;
+        return;
+      }
+      const activePool = pool || await poolPromise;
+      ended = true;
+      await activePool.end();
+    },
+    get totalCount() {
+      return pool?.totalCount || 0;
+    },
+    get idleCount() {
+      return pool?.idleCount || 0;
+    },
+    get waitingCount() {
+      return pool?.waitingCount || 0;
+    }
+  };
+};
+
+export const pgPool = createDeferredPgPool();
+
+export const redisClient = createNamespacedRedisClient({
+  namespace: REDIS_NAMESPACES.PIPELINE
+});
 
 export const connectRedis = async () => {
-  if (!redisClient.isOpen) {
-    await redisClient.connect();
-  }
+  await redisClient.connect();
 };
 
 export const cacheInvoiceData = async (cacheKey, data, ttlSeconds = 3600) => {
@@ -35,7 +159,7 @@ export const cacheInvoiceData = async (cacheKey, data, ttlSeconds = 3600) => {
     await connectRedis();
     await redisClient.setEx(cacheKey, ttlSeconds, JSON.stringify(data));
   } catch (error) {
-    console.error(`Failed to cache invoice data with key [${cacheKey}]:`, error);
+    console.error('Failed to cache invoice data', safeDatabaseError(error));
     throw error;
   }
 };
@@ -47,7 +171,7 @@ export const getInvoiceFromCache = async (cacheKey) => {
     const data = await redisClient.get(cacheKey);
     return data ? JSON.parse(data) : null;
   } catch (error) {
-    console.error(`Failed to get invoice data from cache with key [${cacheKey}]:`, error);
+    console.error('Failed to get cached invoice data', safeDatabaseError(error));
     throw error;
   }
 };
@@ -58,11 +182,11 @@ const normalizeInvoiceInput = (invoiceData = {}) => {
 
   return {
     invoiceId: invoiceData.invoiceId ?? invoiceData.id ?? null,
-    userId: invoiceData.userId || invoiceData.user_id || DEFAULT_USER_ID,
+    userId: invoiceData.userId || invoiceData.user_id || null,
     storeName: String(invoiceData.storeName ?? invoiceData.store_name ?? invoiceData.VendorName ?? '').trim() || 'Không xác định',
     totalAmount: Number.isFinite(totalAmount) ? totalAmount : null,
     currency: invoiceData.currency || 'VND',
-    category: invoiceData.category ?? invoiceData.Category ?? 'Khác',
+    category: normalizeExpenseCategory(invoiceData.category ?? invoiceData.Category) || 'Khác',
     aiAdvice: invoiceData.aiAdvice ?? invoiceData.ai_advice ?? invoiceData.FinancialAdvice ?? null,
     rawText: invoiceData.rawText ?? invoiceData.raw_text ?? null,
     sourceFileKey: invoiceData.sourceFileKey ?? invoiceData.source_file_key ?? null,
@@ -103,6 +227,8 @@ const invoiceValues = (invoice) => [
 export const saveParsedInvoice = async (invoiceData) => {
   const invoice = normalizeInvoiceInput(invoiceData);
 
+  if (!invoice.userId) throw new Error('userId is required to save an invoice.');
+
   if (invoice.status === 'ANALYZED') {
     if (!invoice.invoiceId) throw new Error('invoiceId is required for an analyzed invoice.');
     if (!Number.isFinite(invoice.totalAmount) || invoice.totalAmount <= 0) {
@@ -125,6 +251,7 @@ export const saveParsedInvoice = async (invoiceData) => {
       INSERT INTO invoices (${columns.join(', ')})
       VALUES (${placeholders.join(', ')})
       ON CONFLICT (id) DO UPDATE SET ${updateAssignments}
+      WHERE invoices.user_id = EXCLUDED.user_id
       RETURNING *
     `
     : `
@@ -135,9 +262,10 @@ export const saveParsedInvoice = async (invoiceData) => {
 
   try {
     const result = await pgPool.query(query, values);
-    return result.rows[0];
+    if (!result.rows[0]) throw new Error('Invoice id conflicts with a different user.');
+    return normalizeInvoiceRow(result.rows[0]);
   } catch (error) {
-    console.error('Failed to save parsed invoice to PostgreSQL:', error);
+    console.error('Failed to save parsed invoice to PostgreSQL', safeDatabaseError(error));
     throw error;
   }
 };
@@ -163,11 +291,15 @@ export const createInvoiceRecord = async (invoiceData = {}) => {
       transaction_date,
       payment_method,
       notes,
-      source
+      source,
+      idempotency_key
     )
     VALUES (
-      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14
+      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15
     )
+    ${invoiceData.idempotencyKey
+      ? 'ON CONFLICT (user_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING'
+      : ''}
     RETURNING *
   `;
 
@@ -185,14 +317,25 @@ export const createInvoiceRecord = async (invoiceData = {}) => {
     invoice.transactionDate,
     invoiceData.paymentMethod || null,
     invoiceData.notes || null,
-    invoiceData.source || "MANUAL"
+    "MANUAL",
+    invoiceData.idempotencyKey || null
   ];
 
   try {
+    if (!invoice.userId) throw new Error('userId is required to create an invoice.');
     const result = await pgPool.query(query, values);
-    return result.rows[0];
+    if (result.rows[0]) {
+      return { invoice: normalizeInvoiceRow(result.rows[0]), created: true };
+    }
+    if (!invoiceData.idempotencyKey) throw new Error('Invoice insert did not return a row.');
+    const replay = await pgPool.query(
+      'SELECT * FROM invoices WHERE user_id = $1 AND idempotency_key = $2 LIMIT 1',
+      [invoice.userId, invoiceData.idempotencyKey]
+    );
+    if (!replay.rows[0]) throw new Error('Idempotent invoice replay could not be resolved.');
+    return { invoice: normalizeInvoiceRow(replay.rows[0]), created: false };
   } catch (error) {
-    console.error("Failed to create invoice:", error);
+    console.error('Failed to create invoice', safeDatabaseError(error));
     throw error;
   }
 };
@@ -211,12 +354,9 @@ export const getInvoicesByUser = async (userId) => {
 
   try {
     const result = await pgPool.query(query, [userId]);
-    return result.rows.map((invoice) => ({
-      ...invoice,
-      line_items: enrichStoredLineItems(invoice.line_items),
-    }));
+    return result.rows.map(normalizeInvoiceRow);
   } catch (error) {
-    console.error(`Failed to get invoices for user [${userId}]:`, error);
+    console.error('Failed to get invoices for user', safeDatabaseError(error));
     throw error;
   }
 };
@@ -227,7 +367,7 @@ export const getInvoiceById = async (invoiceId, userId) => {
     [invoiceId, userId]
   );
   const invoice = result.rows[0] || null;
-  return invoice ? { ...invoice, line_items: enrichStoredLineItems(invoice.line_items) } : null;
+  return normalizeInvoiceRow(invoice);
 };
 
 export const searchInvoicesByUser = async (userId, searchQuery, limit = 20) => {
@@ -235,15 +375,16 @@ export const searchInvoicesByUser = async (userId, searchQuery, limit = 20) => {
   if (!userId || query.length < 2) return [];
   const safeLimit = Math.min(Math.max(Number(limit) || 20, 1), 20);
   const pattern = `%${query}%`;
+  const categoryExpression = canonicalCategorySql('category');
   const result = await pgPool.query(`
-    SELECT id, store_name, total_amount::float, currency, category,
+    SELECT id, store_name, total_amount::float, currency, ${categoryExpression} AS category,
       transaction_date::text, status,
       'HD-' || UPPER(RIGHT(REGEXP_REPLACE(id, '[^a-zA-Z0-9]', '', 'g'), 8)) AS reference_code
     FROM invoices
     WHERE user_id = $1 AND status IN ('ANALYZED', 'PAID')
       AND (
         store_name ILIKE $2
-        OR category ILIKE $2
+        OR ${categoryExpression} ILIKE $2
         OR COALESCE(ai_advice, '') ILIKE $2
         OR total_amount::text ILIKE $2
         OR COALESCE(TO_CHAR(transaction_date, 'YYYY-MM-DD'), '') ILIKE $2
@@ -262,7 +403,10 @@ export const searchInvoicesByUser = async (userId, searchQuery, limit = 20) => {
     ORDER BY transaction_date DESC NULLS LAST, created_at DESC
     LIMIT $3
   `, [userId, pattern, safeLimit]);
-  return result.rows;
+  return result.rows.map((row) => ({
+    ...row,
+    category: normalizeExpenseCategory(row.category) || row.category || 'Khác'
+  }));
 };
 
 const EDITABLE_INVOICE_COLUMNS = {
@@ -272,6 +416,8 @@ const EDITABLE_INVOICE_COLUMNS = {
   status: 'status',
   transactionDate: 'transaction_date',
   aiAdvice: 'ai_advice',
+  paymentMethod: 'payment_method',
+  notes: 'notes',
   lineItems: 'line_items'
 };
 
@@ -291,7 +437,7 @@ export const updateInvoiceById = async (invoiceId, userId, changes = {}) => {
      WHERE id = $${values.length - 1} AND user_id = $${values.length} RETURNING *`,
     values
   );
-  return result.rows[0] || null;
+  return normalizeInvoiceRow(result.rows[0]);
 };
 
 export const deleteInvoiceById = async (invoiceId, userId) => {
@@ -307,6 +453,7 @@ export const getDashboardSummary = async (userId, requestedMonth = null) => {
     throw new Error('userId is required to get dashboard summary.');
   }
 
+  const categoryExpression = canonicalCategorySql('category');
   const summaryQuery = `
     SELECT
       COUNT(*)::int AS total_invoices,
@@ -317,16 +464,20 @@ export const getDashboardSummary = async (userId, requestedMonth = null) => {
       COUNT(*) FILTER (WHERE status <> 'PAID' OR status IS NULL)::int AS unpaid_count
     FROM invoices
     WHERE user_id = $1 AND status IN ('ANALYZED', 'PAID')
+      AND transaction_date >= to_date($2 || '-01', 'YYYY-MM-DD')
+      AND transaction_date < (to_date($2 || '-01', 'YYYY-MM-DD') + interval '1 month')::date
   `;
 
   const categoryQuery = `
     SELECT
-      COALESCE(category, 'Khác') AS category,
+      ${categoryExpression} AS category,
       COUNT(*)::int AS invoice_count,
       COALESCE(SUM(total_amount), 0)::float AS total_amount
     FROM invoices
     WHERE user_id = $1 AND status IN ('ANALYZED', 'PAID')
-    GROUP BY COALESCE(category, 'Khác')
+      AND transaction_date >= to_date($2 || '-01', 'YYYY-MM-DD')
+      AND transaction_date < (to_date($2 || '-01', 'YYYY-MM-DD') + interval '1 month')::date
+    GROUP BY ${categoryExpression}
     ORDER BY total_amount DESC
   `;
 
@@ -363,8 +514,8 @@ export const getDashboardSummary = async (userId, requestedMonth = null) => {
     );
 
     const [summaryResult, categoryResult, dailyResult] = await Promise.all([
-      pgPool.query(summaryQuery, [userId]),
-      pgPool.query(categoryQuery, [userId]),
+      pgPool.query(summaryQuery, [userId, selectedMonth]),
+      pgPool.query(categoryQuery, [userId, selectedMonth]),
       pgPool.query(dailyQuery, [userId, selectedMonth])
     ]);
 
@@ -377,9 +528,94 @@ export const getDashboardSummary = async (userId, requestedMonth = null) => {
       latest_transaction_month: availableMonths[0] || null
     };
   } catch (error) {
-    console.error(`Failed to get dashboard summary for user [${userId}]:`, error);
+    console.error('Failed to get dashboard summary', safeDatabaseError(error));
     throw error;
   }
+};
+
+const SPENDING_PLAN_SELECT = `
+  SELECT id, to_char(plan_month, 'YYYY-MM') AS month,
+    monthly_income::float AS monthly_income,
+    needs_percent::float AS needs_percent,
+    wants_percent::float AS wants_percent,
+    savings_percent::float AS savings_percent,
+    currency, created_at, updated_at
+  FROM user_spending_plans
+`;
+
+export const getSpendingPlanByMonth = async (userId, month) => {
+  if (!userId) throw new Error('userId is required to get a spending plan.');
+  const result = await pgPool.query(`
+    ${SPENDING_PLAN_SELECT}
+    WHERE user_id = $1
+      AND plan_month = to_date($2 || '-01', 'YYYY-MM-DD')
+    LIMIT 1
+  `, [userId, month]);
+  return result.rows[0] || null;
+};
+
+export const getLatestSpendingPlan = async (userId, requestedMonth) => {
+  if (!userId) throw new Error('userId is required to get the latest spending plan.');
+  const result = await pgPool.query(`
+    ${SPENDING_PLAN_SELECT}
+    WHERE user_id = $1
+      AND plan_month <= to_date($2 || '-01', 'YYYY-MM-DD')
+    ORDER BY plan_month DESC, updated_at DESC
+    LIMIT 1
+  `, [userId, requestedMonth]);
+  return result.rows[0] || null;
+};
+
+export const upsertSpendingPlan = async (userId, plan = {}) => {
+  if (!userId) throw new Error('userId is required to save a spending plan.');
+  const result = await pgPool.query(`
+    INSERT INTO user_spending_plans (
+      user_id, plan_month, monthly_income, needs_percent,
+      wants_percent, savings_percent, currency
+    )
+    VALUES ($1, to_date($2 || '-01', 'YYYY-MM-DD'), $3, $4, $5, $6, $7)
+    ON CONFLICT (user_id, plan_month) DO UPDATE SET
+      monthly_income = EXCLUDED.monthly_income,
+      needs_percent = EXCLUDED.needs_percent,
+      wants_percent = EXCLUDED.wants_percent,
+      savings_percent = EXCLUDED.savings_percent,
+      currency = EXCLUDED.currency,
+      updated_at = NOW()
+    RETURNING id, to_char(plan_month, 'YYYY-MM') AS month,
+      monthly_income::float AS monthly_income,
+      needs_percent::float AS needs_percent,
+      wants_percent::float AS wants_percent,
+      savings_percent::float AS savings_percent,
+      currency, created_at, updated_at
+  `, [
+    userId,
+    plan.month,
+    plan.monthlyIncome,
+    plan.needsPercent,
+    plan.wantsPercent,
+    plan.savingsPercent,
+    plan.currency
+  ]);
+  return result.rows[0];
+};
+
+export const getMonthlySpendingByCategory = async (userId, month) => {
+  if (!userId) throw new Error('userId is required to get monthly spending.');
+  const categoryExpression = canonicalCategorySql('category');
+  const result = await pgPool.query(`
+    SELECT ${categoryExpression} AS category, COALESCE(SUM(total_amount), 0)::float AS total_amount
+    FROM invoices
+    WHERE user_id = $1
+      AND status IN ('ANALYZED', 'PAID')
+      AND transaction_date >= to_date($2 || '-01', 'YYYY-MM-DD')
+      AND transaction_date < (to_date($2 || '-01', 'YYYY-MM-DD') + interval '1 month')::date
+    GROUP BY ${categoryExpression}
+    ORDER BY category
+  `, [userId, month]);
+  return result.rows.map((row) => ({
+    ...row,
+    category: normalizeExpenseCategory(row.category) || row.category || 'Khác'
+  }));
 };
 
 export const updateInvoicePaymentStatus = async (invoiceId, status, userId) => {
@@ -406,24 +642,37 @@ export const updateInvoicePaymentStatus = async (invoiceId, status, userId) => {
 
     return result.rows[0];
   } catch (error) {
-    console.error(`Failed to update payment status for invoice [${invoiceId}]:`, error);
+    console.error('Failed to update invoice payment status', safeDatabaseError(error));
     throw error;
   }
 };
 
 export const getBudgetsWithSpending = async (userId) => {
+  const budgetCategoryExpression = canonicalCategorySql('b.category');
+  const invoiceCategoryExpression = canonicalCategorySql('i.category');
   const result = await pgPool.query(`
-    SELECT b.id, b.category, b.amount::float AS amount,
+    WITH ranked_budgets AS (
+      SELECT b.*, ${budgetCategoryExpression} AS canonical_category,
+        ROW_NUMBER() OVER (
+          PARTITION BY b.user_id, ${budgetCategoryExpression}, b.budget_month
+          ORDER BY b.updated_at DESC NULLS LAST, b.created_at DESC NULLS LAST, b.id DESC
+        ) AS category_rank
+      FROM budgets b
+      WHERE b.user_id = $1 AND b.budget_month = date_trunc('month', CURRENT_DATE)::date
+    ), current_budgets AS (
+      SELECT * FROM ranked_budgets WHERE category_rank = 1
+    )
+    SELECT b.id, b.canonical_category AS category, b.amount::float AS amount,
       COALESCE(SUM(i.total_amount), 0)::float AS spent,
       b.budget_month::text AS budget_month, b.created_at, b.updated_at
-    FROM budgets b
-    LEFT JOIN invoices i ON i.user_id = b.user_id AND i.category = b.category
+    FROM current_budgets b
+    LEFT JOIN invoices i ON i.user_id = b.user_id
+      AND ${invoiceCategoryExpression} = b.canonical_category
       AND i.status IN ('ANALYZED', 'PAID')
       AND i.transaction_date >= date_trunc('month', CURRENT_DATE)::date
       AND i.transaction_date < (date_trunc('month', CURRENT_DATE) + interval '1 month')::date
-    WHERE b.user_id = $1 AND b.budget_month = date_trunc('month', CURRENT_DATE)::date
-    GROUP BY b.id
-    ORDER BY b.category
+    GROUP BY b.id, b.canonical_category, b.amount, b.budget_month, b.created_at, b.updated_at
+    ORDER BY b.canonical_category
   `, [userId]);
   return result.rows.map((budget) => ({
     ...budget,
@@ -437,13 +686,17 @@ export const getBudgetsWithSpending = async (userId) => {
 };
 
 export const upsertBudget = async (userId, category, amount) => {
+  const canonicalCategory = normalizeExpenseCategory(category) || category;
   const result = await pgPool.query(`
     INSERT INTO budgets (user_id, category, amount, budget_month)
     VALUES ($1, $2, $3, date_trunc('month', CURRENT_DATE)::date)
     ON CONFLICT (user_id, category, budget_month) DO UPDATE SET amount = EXCLUDED.amount, updated_at = NOW()
     RETURNING *
-  `, [userId, category, amount]);
-  return result.rows[0];
+  `, [userId, canonicalCategory, amount]);
+  return {
+    ...result.rows[0],
+    category: normalizeExpenseCategory(result.rows[0]?.category) || result.rows[0]?.category
+  };
 };
 
 export const deleteBudgetById = async (budgetId, userId) => {
@@ -509,7 +762,12 @@ export const updateUserProfile = async (user, changes = {}) => {
 
 export const getUserPreferences = async (user) => {
   await getOrCreateUserProfile(user);
-  const result = await pgPool.query('SELECT * FROM user_preferences WHERE user_id = $1', [user.sub]);
+  const result = await pgPool.query(`
+    SELECT user_id, language, dark_mode, budget_guardrails,
+      auto_analyze_invoices, created_at, updated_at
+    FROM user_preferences
+    WHERE user_id = $1
+  `, [user.sub]);
   return result.rows[0];
 };
 
@@ -519,32 +777,48 @@ export const updateUserPreferences = async (user, changes = {}) => {
     UPDATE user_preferences SET
       language = COALESCE($1, language),
       dark_mode = COALESCE($2, dark_mode),
-      email_alerts = COALESCE($3, email_alerts),
-      budget_guardrails = COALESCE($4, budget_guardrails),
-      auto_analyze_invoices = COALESCE($5, auto_analyze_invoices),
+      budget_guardrails = COALESCE($3, budget_guardrails),
+      auto_analyze_invoices = COALESCE($4, auto_analyze_invoices),
       updated_at = NOW()
-    WHERE user_id = $6
-    RETURNING *
-  `, [changes.language, changes.darkMode, changes.emailAlerts, changes.budgetGuardrails, changes.autoAnalyzeInvoices, user.sub]);
+    WHERE user_id = $5
+    RETURNING user_id, language, dark_mode, budget_guardrails,
+      auto_analyze_invoices, created_at, updated_at
+  `, [changes.language, changes.darkMode, changes.budgetGuardrails, changes.autoAnalyzeInvoices, user.sub]);
   return result.rows[0];
 };
 
 export const getBudgetAlertNotification = async (userId, category) => {
+  const canonicalCategory = normalizeExpenseCategory(category) || category;
+  const budgetCategoryExpression = canonicalCategorySql('b.category');
+  const invoiceCategoryExpression = canonicalCategorySql('i.category');
   const result = await pgPool.query(`
-    SELECT p.email, p.display_name, b.category, b.amount::float AS budget_amount,
+    WITH ranked_budgets AS (
+      SELECT b.*, ${budgetCategoryExpression} AS canonical_category,
+        ROW_NUMBER() OVER (
+          PARTITION BY b.user_id, ${budgetCategoryExpression}, b.budget_month
+          ORDER BY b.updated_at DESC NULLS LAST, b.created_at DESC NULLS LAST, b.id DESC
+        ) AS category_rank
+      FROM budgets b
+      WHERE b.user_id = $1
+        AND ${budgetCategoryExpression} = $2
+        AND b.budget_month = date_trunc('month', CURRENT_DATE)::date
+    )
+    SELECT p.email, p.display_name, b.canonical_category AS category,
+      b.amount::float AS budget_amount,
       COALESCE(SUM(i.total_amount), 0)::float AS spent
     FROM user_profiles p
     JOIN user_preferences pref ON pref.user_id = p.user_id
-      AND pref.email_alerts = true AND pref.budget_guardrails = true
-    JOIN budgets b ON b.user_id = p.user_id AND b.category = $2
-      AND b.budget_month = date_trunc('month', CURRENT_DATE)::date
-    LEFT JOIN invoices i ON i.user_id = b.user_id AND i.category = b.category
+      AND pref.budget_guardrails = true
+    JOIN ranked_budgets b ON b.user_id = p.user_id AND b.category_rank = 1
+    LEFT JOIN invoices i ON i.user_id = b.user_id
+      AND ${invoiceCategoryExpression} = b.canonical_category
+      AND i.status IN ('ANALYZED', 'PAID')
       AND i.transaction_date >= date_trunc('month', CURRENT_DATE)::date
       AND i.transaction_date < (date_trunc('month', CURRENT_DATE) + interval '1 month')::date
     WHERE p.user_id = $1
-    GROUP BY p.user_id, b.id
+    GROUP BY p.user_id, b.id, b.canonical_category, b.amount
     HAVING COALESCE(SUM(i.total_amount), 0) >= b.amount * 0.8
-  `, [userId, category]);
+  `, [userId, canonicalCategory]);
   return result.rows[0] || null;
 };
 
@@ -559,21 +833,22 @@ export const createNotification = async ({ userId, type, title, message, referen
 };
 
 export const evaluateBudgetNotifications = async (userId, category) => {
+  const canonicalCategory = normalizeExpenseCategory(category) || category;
   const budgets = await getBudgetsWithSpending(userId);
-  const budget = budgets.find((item) => item.category === category);
+  const budget = budgets.find((item) => item.category === canonicalCategory);
   if (!budget) return { budget: null, createdNotifications: [] };
   const month = String(budget.budget_month).slice(0, 7);
   const thresholds = [];
   if (budget.spent >= budget.limit * 0.8) thresholds.push({
     type: 'BUDGET_WARNING',
     threshold: 80,
-    title: `Ngân sách ${category} đã đạt 80%`,
+    title: `Ngân sách ${canonicalCategory} đã đạt 80%`,
     message: `Bạn đã chi ${budget.spent.toLocaleString('vi-VN')} ₫ trên hạn mức ${budget.limit.toLocaleString('vi-VN')} ₫.`
   });
   if (budget.spent >= budget.limit) thresholds.push({
     type: 'BUDGET_EXCEEDED',
     threshold: 100,
-    title: `Ngân sách ${category} đã vượt hạn mức`,
+    title: `Ngân sách ${canonicalCategory} đã vượt hạn mức`,
     message: `Chi tiêu hiện tại là ${budget.spent.toLocaleString('vi-VN')} ₫, tương đương ${budget.percentage}% hạn mức.`
   });
   const createdNotifications = [];

@@ -9,6 +9,11 @@ import { requireAuth } from '../utils/cognitoAuth.js';
 import { logger } from '../utils/logger.js';
 import * as response from '../utils/response.js';
 
+const safeFailure = (error) => ({
+  name: error?.name || 'NotificationError',
+  code: error?.code || 'NOTIFICATION_REQUEST_FAILED'
+});
+
 export const handler = async (event = {}) => {
   const auth = await requireAuth(event);
   if (auth.error) return auth.error;
@@ -42,7 +47,10 @@ export const handler = async (event = {}) => {
     }
     return response.sendResponse(405, { message: 'Method not allowed.' });
   } catch (error) {
-    logger.error('Notification API failed', error, { userId, method, path });
-    return response.serverError(`Không thể xử lý thông báo: ${error.message}`);
+    logger.error('Notification API failed', safeFailure(error), { userId, method, path });
+    return response.serverError(
+      'Không thể xử lý thông báo.',
+      'NOTIFICATION_REQUEST_FAILED'
+    );
   }
 };

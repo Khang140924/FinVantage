@@ -9,13 +9,12 @@ import { publishBudgetAlert } from '../services/notification.service.js';
 import { requireAuth } from '../utils/cognitoAuth.js';
 import * as response from '../utils/response.js';
 import { logger } from '../utils/logger.js';
+import { normalizeExpenseCategory } from '../../shared/expenseCategories.js';
 
 const parseBody = (event) => {
   if (!event.body) return {};
   return typeof event.body === 'string' ? JSON.parse(event.body) : event.body;
 };
-
-const BUDGET_CATEGORIES = ['Ăn uống', 'Di chuyển', 'Mua sắm', 'Giải trí', 'Hóa đơn', 'Sức khỏe', 'Giáo dục', 'Khác'];
 
 export const handler = async (event = {}) => {
   const auth = await requireAuth(event);
@@ -39,9 +38,9 @@ export const handler = async (event = {}) => {
 
     if (method === 'POST') {
       const body = parseBody(event);
-      const category = String(body.category || '').trim();
+      const category = normalizeExpenseCategory(body.category);
       const amount = Number(body.amount ?? body.limit);
-      if (!BUDGET_CATEGORIES.includes(category)) {
+      if (!category) {
         return response.badRequest('Danh mục ngân sách không hợp lệ.');
       }
       if (!Number.isFinite(amount) || amount <= 0 || !Number.isSafeInteger(amount)) {
@@ -66,6 +65,9 @@ export const handler = async (event = {}) => {
     return response.sendResponse(405, { message: 'Method not allowed.' });
   } catch (error) {
     logger.error('Budget API failed', error, { userId, method });
-    return response.serverError(`Không thể xử lý ngân sách: ${error.message}`);
+    return response.serverError(
+      'Không thể xử lý ngân sách lúc này.',
+      'BUDGET_REQUEST_FAILED'
+    );
   }
 };

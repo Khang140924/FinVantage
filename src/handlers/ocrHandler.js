@@ -3,6 +3,8 @@ import { cacheInvoiceData, createNotification } from '../services/db.service.js'
 import { logger } from '../utils/logger.js';
 import { buildOcrCacheKey, sanitizeInvoiceId } from '../utils/invoice.js';
 import { assertValidOcrPayload, normalizeOcrCachePayload } from '../utils/textractExpense.js';
+import { sanitizedAwsLogError } from '../utils/awsError.js';
+import { classifyOcrError } from '../utils/ocrError.js';
 
 const cacheStatus = (cacheKey, invoiceId, fileKey, userId, status, extra = {}) => cacheInvoiceData(cacheKey, {
   invoiceId,
@@ -61,12 +63,15 @@ export const handler = async (event = {}) => {
       await cacheInvoiceData(cacheKey, cachedInvoice);
       logger.info('OCR data cached for analysis', { invoiceId, fileKey, cacheKey });
     } catch (error) {
-      const errorCode = error.code || 'OCR_PROCESSING_FAILED';
+      const details = classifyOcrError(error);
+      const isAwsFailure = details.code.startsWith('AWS_');
+      const errorCode = details.code;
+      const errorMessage = details.message;
       try {
         await cacheStatus(cacheKey, invoiceId, fileKey, userId, 'OCR_FAILED', {
-          progress: 50,
+          progress: isAwsFailure ? 25 : 50,
           errorCode,
-          errorMessage: error.message
+          errorMessage
         });
       } catch (cacheError) {
         logger.warn('Could not cache OCR_FAILED status from S3 trigger', {
@@ -75,7 +80,7 @@ export const handler = async (event = {}) => {
           error: cacheError.message
         });
       }
-      logger.error('S3-triggered invoice OCR failed', error, {
+      logger.error('S3-triggered invoice OCR failed', sanitizedAwsLogError(error, isAwsFailure ? details : null), {
         invoiceId,
         fileKey,
         status: 'OCR_FAILED',
@@ -87,7 +92,7 @@ export const handler = async (event = {}) => {
             userId,
             type: 'INVOICE_FAILED',
             title: 'Xử lý hóa đơn thất bại',
-            message: error.message,
+            message: errorMessage,
             referenceId: invoiceId,
             dedupeKey: `invoice:${invoiceId}:failed:ocr:${errorCode}`
           });
@@ -99,7 +104,7 @@ export const handler = async (event = {}) => {
           });
         }
       }
-      throw error;
+      throw sanitizedAwsLogError(error, isAwsFailure ? details : null);
     }
   }
 };
