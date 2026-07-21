@@ -15,10 +15,10 @@ export default function Login() {
   const [message, setMessage] = useState("");
 
   useEffect(() => {
-    if (auth.authMode !== "cognito") return undefined;
-    const redirectTimer = window.setTimeout(() => auth.hostedLogin(), 150);
+    if (auth.authMode !== "cognito" || auth.status !== "unauthenticated") return undefined;
+    const redirectTimer = window.setTimeout(() => auth.hostedLogin({ automatic: true }), 150);
     return () => window.clearTimeout(redirectTimer);
-  }, [auth.authMode, auth.hostedLogin]);
+  }, [auth.authMode, auth.hostedLogin, auth.status]);
 
   const title = useMemo(() => ({
     login: t("auth.loginTitle"), register: t("auth.registerTitle"), verify: t("auth.verifyTitle"),

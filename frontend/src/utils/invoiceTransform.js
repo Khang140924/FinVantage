@@ -1,3 +1,5 @@
+import { normalizeExpenseCategory } from "../../../shared/expenseCategories.js";
+
 const categoryColors = ["#10b981", "#3b82f6", "#f59e0b", "#8b5cf6", "#ef4444", "#14b8a6", "#f43f5e"];
 
 function toNumber(value) {
@@ -22,22 +24,26 @@ function toDateInput(value) {
 
 export function normalizeInvoice(invoice = {}) {
   const id = String(invoice.id ?? invoice.invoiceId ?? "");
+  const source = String(invoice.source || "").trim().toUpperCase();
+  const rawCategory = invoice.category || "";
 
   return {
     id,
     store: invoice.store_name || invoice.storeName || "Không xác định",
     date: formatInvoiceDate(invoice.transaction_date || invoice.transactionDate || invoice.created_at || invoice.createdAt),
     transactionDate: toDateInput(invoice.transaction_date || invoice.transactionDate || invoice.created_at || invoice.createdAt),
-    category: invoice.category || "Uncategorized",
+    category: normalizeExpenseCategory(rawCategory) || rawCategory || "Khác",
     amount: toNumber(invoice.total_amount ?? invoice.totalAmount),
     currency: invoice.currency || "VND",
-    method: invoice.source_file_key || invoice.sourceFileKey ? "OCR Upload" : "AI Analysis",
+    method: source === "MANUAL"
+      ? "MANUAL"
+      : (invoice.source_file_key || invoice.sourceFileKey ? "OCR Upload" : "AI Analysis"),
     status: invoice.status || "ANALYZED",
     rawText: invoice.raw_text || invoice.rawText || "",
     aiAdvice: invoice.ai_advice || invoice.aiAdvice || "",
     lineItems: Array.isArray(invoice.line_items ?? invoice.lineItems) ? (invoice.line_items ?? invoice.lineItems) : [],
     sourceFileKey: invoice.source_file_key || invoice.sourceFileKey || "",
-    source: invoice.source || "backend",
+    source: source || "backend",
   };
 }
 
@@ -50,7 +56,7 @@ export function buildCategorySpending(summary) {
 
   return categories
     .map((item, index) => ({
-      name: item.category || "Uncategorized",
+      name: normalizeExpenseCategory(item.category) || item.category || "Khác",
       value: toNumber(item.total_amount ?? item.value),
       color: categoryColors[index % categoryColors.length],
     }))
@@ -73,7 +79,7 @@ export function normalizeAnalysisPayload(payload = {}) {
     currency: analysis.currency || invoice.currency || "VND",
     transaction_date: transactionDate ? String(transactionDate).slice(0, 10) : null,
     line_items: Array.isArray(lineItems) ? lineItems : [],
-    category: analysis.category || invoice.category || "Uncategorized",
+    category: normalizeExpenseCategory(analysis.category || invoice.category) || "Khác",
     confidence: analysis.confidence ?? invoice.confidence ?? null,
     ai_advice: analysis.ai_advice || invoice.ai_advice || "",
   };

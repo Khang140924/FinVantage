@@ -1,0 +1,42 @@
+[
+  {
+    "ParameterKey": "VpcId",
+    "ParameterValue": "vpc-placeholder"
+  },
+  {
+    "ParameterKey": "PrivateSubnetIds",
+    "ParameterValue": "subnet-placeholder-a,subnet-placeholder-b"
+  },
+  {
+    "ParameterKey": "DatabaseName",
+    "ParameterValue": "finvantage"
+  },
+  {
+    "ParameterKey": "DatabaseUsername",
+    "ParameterValue": "finvantage_app"
+  },
+  {
+    "ParameterKey": "DatabaseAdminUsername",
+    "ParameterValue": "finvantage_admin"
+  },
+  {
+    "ParameterKey": "DatabaseInstanceClass",
+    "ParameterValue": "db.t4g.micro"
+  },
+  {
+    "ParameterKey": "DatabaseDeletionProtection",
+    "ParameterValue": "true"
+  },
+  {
+    "ParameterKey": "DatabaseMultiAZ",
+    "ParameterValue": "false"
+  },
+  {
+    "ParameterKey": "ValkeyNodeType",
+    "ParameterValue": "cache.t4g.micro"
+  },
+  {
+    "ParameterKey": "ValkeyNodeCount",
+    "ParameterValue": "1"
+  }
+]

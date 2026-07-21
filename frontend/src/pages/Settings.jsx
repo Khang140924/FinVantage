@@ -1,6 +1,10 @@
-import { Bell, Camera, Database, Loader2, Moon, Save, ShieldCheck, UserRound } from "lucide-react";
+import { Camera, Database, Loader2, Moon, Save, ShieldCheck, UserRound } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useLanguage } from "../i18n/LanguageContext.jsx";
+import {
+  createPreferenceTogglePatch,
+  SETTINGS_PREFERENCE_TOGGLES,
+} from "../utils/settingsPreferences.js";
 
 const initialProfileForm = { displayName: "", phone: "", timezone: "Asia/Bangkok" };
 
@@ -108,13 +112,12 @@ function ProfileTab({ profile, form, setForm, saving, avatarProgress, t, onSave,
 
 function PreferencesTab({ preferences, saving, t, onSave }) {
   const values = preferences || {};
-  const toggles = [
-    ["darkMode", "dark_mode", Moon, "darkModeTitle", "darkModeDesc"],
-    ["emailAlerts", "email_alerts", Bell, "emailAlertsTitle", "emailAlertsDesc"],
-    ["budgetGuardrails", "budget_guardrails", ShieldCheck, "budgetGuardrailsTitle", "budgetGuardrailsDesc"],
-    ["autoAnalyzeInvoices", "auto_analyze_invoices", Database, "autoAnalyzeTitle", "autoAnalyzeDesc"],
-  ];
-  return <section className="app-card p-6"><h2 className="text-lg font-bold">{t("settings.preferences")}</h2><div className="mt-4 divide-y divide-slate-100 dark:divide-slate-800">{toggles.map(([apiKey, dbKey, Icon, title, desc]) => <Toggle key={dbKey} icon={Icon} title={t(`settings.${title}`)} description={t(`settings.${desc}`)} checked={Boolean(values[dbKey])} disabled={saving} onChange={() => onSave({ [apiKey]: !values[dbKey] })} />)}<div className="grid gap-4 py-4 sm:grid-cols-2"><Select label={t("settings.language")} value={values.language || "vi"} onChange={(language) => onSave({ language })} options={["vi", "en"]} /></div></div></section>;
+  const icons = {
+    darkMode: Moon,
+    budgetGuardrails: ShieldCheck,
+    autoAnalyzeInvoices: Database,
+  };
+  return <section className="app-card p-6"><h2 className="text-lg font-bold">{t("settings.preferences")}</h2><div className="mt-4 divide-y divide-slate-100 dark:divide-slate-800">{SETTINGS_PREFERENCE_TOGGLES.map((definition) => <Toggle key={definition.dbKey} icon={icons[definition.iconKey]} title={t(`settings.${definition.titleKey}`)} description={t(`settings.${definition.descriptionKey}`)} checked={Boolean(values[definition.dbKey])} disabled={saving} onChange={() => onSave(createPreferenceTogglePatch(values, definition))} />)}<div className="grid gap-4 py-4 sm:grid-cols-2"><Select label={t("settings.language")} value={values.language || "vi"} onChange={(language) => onSave({ language })} options={["vi", "en"]} /></div></div></section>;
 }
 
 function Input({ label, value, onChange, type = "text", ...props }) {

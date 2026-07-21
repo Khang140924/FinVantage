@@ -1,0 +1,20 @@
+[
+  {
+    "source": "/auth",
+    "target": "https://auth-api.example.invalid/prod/auth",
+    "status": "200",
+    "condition": null
+  },
+  {
+    "source": "/auth/<*>",
+    "target": "https://auth-api.example.invalid/prod/auth/<*>",
+    "status": "200",
+    "condition": null
+  },
+  {
+    "source": "</^[^.]+$|\\.(?!(css|gif|ico|jpg|jpeg|js|png|txt|svg|woff|woff2|ttf|map|json|webp)$)([^.]+$)/>",
+    "target": "/index.html",
+    "status": "200",
+    "condition": null
+  }
+]

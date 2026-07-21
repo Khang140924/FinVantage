@@ -11,6 +11,7 @@ import {
 } from "../services/api.js";
 import { useLanguage } from "../i18n/LanguageContext.jsx";
 import { createImagePreview, getFileExtension, isPreviewableImage } from "../utils/uploadPreview.js";
+import { awsErrorTranslationKey, continueAfterSuccessfulUpload, evaluateTrackedTrigger, failureStepForStage, isAwsConfigurationCode, resolveUploadProgress } from "../utils/uploadPipeline.js";
 
 const stepKeys = [
   "upload.steps.uploading",
@@ -83,6 +84,10 @@ function getUploadIdentity(data = {}) {
 function getDisplayError(error, stage, t) {
   const backendMessage = getBackendMessage(error);
   const backendCode = error?.data?.code || error?.code;
+
+  if (isAwsConfigurationCode(backendCode)) {
+    return t(awsErrorTranslationKey(backendCode));
+  }
 
   if (error?.code === "MISSING_API_BASE_URL") {
     return t("upload.errors.apiBaseMissing");
@@ -165,17 +170,19 @@ export default function UploadInvoice({ onNavigate, onAnalysisComplete }) {
   const [pipelineStatus, setPipelineStatus] = useState(null);
   const [uploadData, setUploadData] = useState(null);
   const [analysisData, setAnalysisData] = useState(null);
+  const [failedStepIndex, setFailedStepIndex] = useState(null);
 
   const steps = useMemo(() => stepKeys.map((key) => t(key)), [t]);
   const isComplete = pipelineStatus?.status === "ANALYZED" && Boolean(analysisData) && !isAnalyzing;
   const canClear = Boolean(selectedFile || error || uploadData || analysisData || stepIndex >= 0) && !isAnalyzing;
 
   const progress = useMemo(() => {
-    if (Number.isFinite(Number(pipelineStatus?.progress))) return Number(pipelineStatus.progress);
-    if (isComplete) return 100;
-    if (stepIndex < 0) return 0;
-    return Math.round(((stepIndex + 1) / steps.length) * 100);
-  }, [isComplete, pipelineStatus?.progress, stepIndex, steps.length]);
+    return resolveUploadProgress({
+      pipelineProgress: pipelineStatus?.progress,
+      isComplete,
+      stepIndex
+    });
+  }, [isComplete, pipelineStatus?.progress, stepIndex]);
 
   useEffect(() => () => pollingControllerRef.current?.abort(), []);
   useEffect(() => {
@@ -215,6 +222,7 @@ export default function UploadInvoice({ onNavigate, onAnalysisComplete }) {
     else if (status === "OCR_FAILED") setStepIndex(1);
     else if (status === "ANALYSIS_FAILED") setStepIndex(2);
     else if (status === "UPLOADED") setStepIndex(1);
+    else if (status === "UPLOAD_PENDING") setStepIndex(0);
   }
 
   async function pollUntil(invoiceId, ready, signal) {
@@ -248,11 +256,18 @@ export default function UploadInvoice({ onNavigate, onAnalysisComplete }) {
       .catch((currentError) => { triggerSettled = true; triggerError = currentError; });
 
     for (let attempt = 0; attempt < maxPollAttempts; attempt += 1) {
-      if (triggerSettled && !triggerError) {
-        applyPipelineStatus(triggerResult || {});
-        return triggerResult;
+      const triggerState = evaluateTrackedTrigger({
+        settled: triggerSettled,
+        result: triggerResult,
+        error: triggerError,
+        ready,
+        isRecoverable: isRecoverableRequestError,
+      });
+      if (triggerState.error) throw triggerState.error;
+      if (triggerState.shouldReturn) {
+        applyPipelineStatus(triggerState.result || {});
+        return triggerState.result;
       }
-      if (triggerSettled && triggerError && !isRecoverableRequestError(triggerError)) throw triggerError;
 
       await waitForPoll(signal);
       let statusData;
@@ -282,7 +297,7 @@ export default function UploadInvoice({ onNavigate, onAnalysisComplete }) {
 
   function resetWorkflowState({ keepSelectedFile = false } = {}) {
     pollingControllerRef.current?.abort();
-  setIsPreviewOpen(false);
+    setIsPreviewOpen(false);
     if (!keepSelectedFile) {
       setSelectedFile(null);
     }
@@ -293,6 +308,7 @@ export default function UploadInvoice({ onNavigate, onAnalysisComplete }) {
     setPipelineStatus(null);
     setUploadData(null);
     setAnalysisData(null);
+    setFailedStepIndex(null);
   }
 
   function handleSelectedFile(file) {
@@ -347,20 +363,22 @@ export default function UploadInvoice({ onNavigate, onAnalysisComplete }) {
     setPipelineStatus(null);
     setUploadData(null);
     setAnalysisData(null);
+    setFailedStepIndex(null);
     setIsAnalyzing(true);
     setStepIndex(0);
 
     try {
       const importedInvoice = await importInvoice(selectedFile);
 
-      if (!importedInvoice?.invoiceId || !importedInvoice?.fileKey) {
-        throw new ApiError("Import response is missing invoiceId or fileKey.", {
+      const uploadIdentity = getUploadIdentity(importedInvoice);
+      const identityIsValid = [uploadIdentity.invoiceId, uploadIdentity.fileKey, uploadIdentity.cacheKey]
+        .every((value) => typeof value === "string" && value.trim());
+      if (!identityIsValid) {
+        throw new ApiError("Import response is missing invoiceId, fileKey or cacheKey.", {
           code: "INVALID_IMPORT_RESPONSE",
           data: importedInvoice,
         });
       }
-
-      const uploadIdentity = getUploadIdentity(importedInvoice);
       setUploadData(uploadIdentity);
       applyPipelineStatus(importedInvoice);
 
@@ -372,15 +390,23 @@ export default function UploadInvoice({ onNavigate, onAnalysisComplete }) {
         let observedStatus = importedInvoice;
 
         if (importedInvoice.uploadRequired !== false) {
-          if (!importedInvoice.uploadUrl) {
-            throw new ApiError("Import response is missing uploadUrl.", {
-              code: "MISSING_UPLOAD_URL",
+          let parsedUploadUrl;
+          try {
+            parsedUploadUrl = new URL(importedInvoice.uploadUrl);
+          } catch {
+            parsedUploadUrl = null;
+          }
+          if (!parsedUploadUrl || !["http:", "https:"].includes(parsedUploadUrl.protocol)) {
+            throw new ApiError("Import response has an invalid uploadUrl.", {
+              code: "INVALID_IMPORT_RESPONSE",
               data: importedInvoice,
             });
           }
           currentStage = "upload";
-          await uploadInvoiceFile(importedInvoice.uploadUrl, selectedFile);
-          observedStatus = { invoiceId: uploadIdentity.invoiceId, status: "UPLOADED", progress: 25 };
+          observedStatus = await continueAfterSuccessfulUpload({
+            upload: () => uploadInvoiceFile(importedInvoice.uploadUrl, selectedFile),
+            continuePipeline: () => ({ invoiceId: uploadIdentity.invoiceId, status: "UPLOADED", progress: 25 }),
+          });
           applyPipelineStatus(observedStatus);
         }
 
@@ -453,6 +479,7 @@ export default function UploadInvoice({ onNavigate, onAnalysisComplete }) {
     } catch (currentError) {
       if (currentError?.name === "AbortError") return;
       setAnalysisData(null);
+      setFailedStepIndex(failureStepForStage(currentStage));
       setError(getDisplayError(currentError, currentStage, t));
     } finally {
       if (!pollingController.signal.aborted) setIsAnalyzing(false);
@@ -474,6 +501,7 @@ export default function UploadInvoice({ onNavigate, onAnalysisComplete }) {
       const statusData = await getInvoiceStatus(uploadData.invoiceId);
       applyPipelineStatus(statusData);
       if (terminalFailureStatuses.has(statusData.status)) {
+        setFailedStepIndex(statusData.status === "OCR_FAILED" ? 1 : 2);
         setError(statusData.error?.message || t("upload.errors.pipelineFailed"));
         return;
       }
@@ -629,7 +657,7 @@ export default function UploadInvoice({ onNavigate, onAnalysisComplete }) {
         <div className="mt-6 flex flex-wrap items-center gap-3">
           <button type="button" className="primary-button" onClick={handleAnalyze} disabled={!selectedFile || isAnalyzing}>
             {isAnalyzing ? <Loader2 className="h-4 w-4 animate-spin" /> : <UploadCloud className="h-4 w-4" />}
-            {t("actions.uploadAnalyze")}
+            {failedStepIndex !== null && !isAnalyzing ? t("analysis.retry") : t("actions.uploadAnalyze")}
           </button>
           <button type="button" className="soft-button" onClick={clearSelection} disabled={!canClear}>
             <X className="h-4 w-4" />
@@ -672,23 +700,26 @@ export default function UploadInvoice({ onNavigate, onAnalysisComplete }) {
             {steps.map((step, index) => {
               const isDone = index < stepIndex || (isComplete && index === stepIndex);
               const isCurrent = index === stepIndex && isAnalyzing;
+              const isFailed = index === failedStepIndex && !isAnalyzing;
               return (
                 <div key={stepKeys[index]} className="flex items-center gap-3">
                   <span
                     className={`flex h-9 w-9 items-center justify-center rounded-lg transition duration-300 ${
-                      isDone
+                      isFailed
+                        ? "bg-rose-100 text-rose-700 ring-1 ring-rose-200 dark:bg-rose-950 dark:text-rose-300 dark:ring-rose-900"
+                        : isDone
                         ? "bg-emerald-600 text-white"
                         : isCurrent
                           ? "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-100 dark:bg-emerald-950 dark:text-emerald-300 dark:ring-emerald-900"
                           : "bg-slate-100 text-slate-400 dark:bg-slate-800"
                     }`}
                   >
-                    {isCurrent ? <Loader2 className="h-4 w-4 animate-spin" /> : isDone ? <Check className="h-4 w-4" /> : index + 1}
+                    {isFailed ? <AlertCircle className="h-4 w-4" /> : isCurrent ? <Loader2 className="h-4 w-4 animate-spin" /> : isDone ? <Check className="h-4 w-4" /> : index + 1}
                   </span>
                   <div>
                     <p className="text-sm font-semibold text-slate-900 dark:text-white">{step}</p>
                     <p className="text-xs text-slate-500 dark:text-slate-400">
-                      {isDone ? t("common.completed") : isCurrent ? t("common.processing") : t("common.waiting")}
+                      {isFailed ? t("common.error") : isDone ? t("common.completed") : isCurrent ? t("common.processing") : t("common.waiting")}
                     </p>
                   </div>
                 </div>

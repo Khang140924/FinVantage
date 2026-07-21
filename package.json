@@ -5,12 +5,27 @@
   "main": "src/handlers/importHandler.js",
   "type": "module",
   "scripts": {
-    "api:dev": "serverless offline --stage dev",
+    "api:dev": "node scripts/serverless-local.js",
     "auth:dev": "node auth-server/index.js",
     "frontend:dev": "npm --prefix frontend run dev",
     "frontend:build": "npm --prefix frontend run build",
     "frontend:preview": "npm --prefix frontend run preview",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "npm run test:unit && npm run test:auth:local",
+    "test:unit": "node --test tests/frontendUiHelpers.test.js tests/itemNormalization.test.js tests/textractExpense.test.js tests/spendingPlan.service.test.js tests/spendingPlanFrontendHelpers.test.js tests/authMode.test.js tests/authLambda.unit.test.js tests/awsError.unit.test.js tests/bedrockProfile.unit.test.js tests/cors.unit.test.js tests/dataInfrastructure.unit.test.js tests/databaseUserBootstrap.unit.test.js tests/dbConfig.production.test.js tests/dbSecret.unit.test.js tests/importHandler.unit.test.js tests/invoiceUploadValidation.unit.test.js tests/migrationRunner.unit.test.js tests/ocrError.unit.test.js tests/productionConfig.unit.test.js tests/productionSafety.unit.test.js tests/redisClient.unit.test.js tests/settingsPreferences.test.js tests/uploadPipeline.unit.test.js tests/expenseCategories.test.js tests/transactionsFrontendHelpers.test.js tests/transactionValidation.unit.test.js tests/transactionContracts.unit.test.js tests/invoiceCrudHandlers.unit.test.js",
+    "test:auth:local": "node --test tests/authServer.local.integration.test.js",
+    "test:spending-plan:integration": "node --test tests/spendingPlan.integration.test.js",
+    "test:transactions:integration": "node --test tests/transactions.postgres.integration.test.js",
+    "syntax:check": "node scripts/check-syntax.js",
+    "db:validate": "node scripts/migrate.js --validate --baseline",
+    "db:migrate:plan": "node scripts/migrate.js --plan",
+    "db:migrate:baseline:plan": "node scripts/migrate.js --plan --baseline",
+    "db:migrate:status": "node scripts/migrate.js --status",
+    "db:migrate": "node scripts/migrate.js --apply",
+    "db:bootstrap-user": "node scripts/bootstrapDatabaseUser.js",
+    "production:validate": "node scripts/validate-production.js",
+    "config:validate": "node scripts/validate-config-files.js",
+    "serverless:print:prod": "serverless print --stage prod",
+    "serverless:package:prod": "serverless package --stage prod"
   },
   "keywords": [],
   "author": "",
@@ -19,19 +34,28 @@
     "@aws-sdk/client-bedrock-runtime": "^3.609.0",
     "@aws-sdk/client-cognito-identity-provider": "^3.1088.0",
     "@aws-sdk/client-s3": "^3.609.0",
+    "@aws-sdk/client-secrets-manager": "^3.1090.0",
     "@aws-sdk/client-sns": "^3.1088.0",
     "@aws-sdk/client-textract": "^3.609.0",
+    "@aws-sdk/credential-providers": "^3.1080.0",
     "@aws-sdk/s3-request-presigner": "^3.1080.0",
     "aws-jwt-verify": "^4.0.1",
+    "connect-redis": "^8.1.0",
     "dotenv": "^16.4.5",
     "express": "^4.21.1",
     "express-session": "^1.18.1",
     "openid-client": "^5.7.0",
     "pg": "^8.12.0",
-    "redis": "^4.6.15"
+    "redis": "^4.6.15",
+    "serverless-http": "^4.0.0"
   },
   "devDependencies": {
-    "serverless": "^3.38.0",
-    "serverless-offline": "^13.10.1"
+    "serverless": "^4.39.0",
+    "serverless-offline": "^14.7.4",
+    "yaml": "^2.9.0"
+  },
+  "engines": {
+    "node": ">=24 <25",
+    "npm": ">=11"
   }
 }

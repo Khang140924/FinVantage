@@ -6,6 +6,7 @@ import {
   LogOut,
   ReceiptText,
   Settings,
+  Target,
   UploadCloud,
   WalletCards,
 } from "lucide-react";
@@ -18,6 +19,7 @@ const navItems = [
   { id: "analysis", labelKey: "nav.analysis", icon: FileSearch },
   { id: "transactions", labelKey: "nav.transactions", icon: ReceiptText },
   { id: "budgets", labelKey: "nav.budgets", icon: BellRing },
+  { id: "spending-plan", labelKey: "nav.spendingPlan", icon: Target },
   { id: "settings", labelKey: "nav.settings", icon: Settings },
 ];
 
@@ -107,7 +109,7 @@ export default function Sidebar({ activePage, onNavigate, monthlyUsage = 0 }) {
         </div>
       </aside>
 
-      <nav className="fixed bottom-0 left-0 right-0 z-40 grid grid-cols-6 gap-1 border-t border-slate-200 bg-white px-2 py-2 shadow-lg dark:border-slate-800 dark:bg-slate-950 lg:hidden">
+      <nav className="fixed bottom-0 left-0 right-0 z-40 flex gap-1 overflow-x-auto border-t border-slate-200 bg-white px-2 py-2 shadow-lg dark:border-slate-800 dark:bg-slate-950 lg:hidden">
         {navItems.map((item) => {
           const Icon = item.icon;
           const isActive = activePage === item.id;
@@ -117,7 +119,7 @@ export default function Sidebar({ activePage, onNavigate, monthlyUsage = 0 }) {
               type="button"
               onClick={() => onNavigate(item.id)}
               title={t(item.labelKey)}
-              className={`flex h-12 items-center justify-center rounded-lg transition duration-200 ${
+              className={`flex h-12 min-w-[48px] flex-1 shrink-0 items-center justify-center rounded-lg transition duration-200 ${
                 isActive
                   ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
                   : "text-slate-500 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-900"

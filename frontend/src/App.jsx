@@ -5,6 +5,7 @@ import UploadInvoice from "./pages/UploadInvoice.jsx";
 import AnalysisResult from "./pages/AnalysisResult.jsx";
 import Transactions from "./pages/Transactions.jsx";
 import BudgetAlerts from "./pages/BudgetAlerts.jsx";
+import SpendingPlan from "./pages/SpendingPlan.jsx";
 import Settings from "./pages/Settings.jsx";
 import Login from "./pages/Login.jsx";
 import { useLanguage } from "./i18n/LanguageContext.jsx";
@@ -24,7 +25,7 @@ import {
 } from "./services/api.js";
 import { normalizeAnalysisPayload, normalizeInvoices } from "./utils/invoiceTransform.js";
 
-const pageIds = new Set(["dashboard", "upload", "analysis", "transactions", "budgets", "settings"]);
+const pageIds = new Set(["dashboard", "upload", "analysis", "transactions", "budgets", "spending-plan", "settings"]);
 
 function readRoute(pathname = window.location.pathname) {
   const [page = "dashboard", encodedInvoiceId] = pathname.split("/").filter(Boolean);
@@ -183,45 +184,13 @@ export default function App() {
     window.history.pushState({}, "", routePath(pageId, invoiceId));
   }, []);
 
-  const handleCreateInvoice = useCallback(async (invoiceData) => {
+const handleCreateInvoice = useCallback(async (invoiceData, idempotencyKey) => {
   try {
-    const invoice = await createInvoice(invoiceData);
-
-    if (invoice) {
-      setInvoices((current) => [
-        invoice,
-        ...current,
-      ]);
-    }
+    const result = await createInvoice(invoiceData, idempotencyKey);
 
     await refreshFinanceData();
 
-    return invoice;
-
-  } catch (error) {
-    setApiStatus((current) => ({
-      ...current,
-      error: error.message || "Failed to create invoice.",
-    }));
-
-    throw error;
-  }
-}, [refreshFinanceData]);
-
-const handleCreateInvoice = useCallback(async (invoiceData) => {
-  try {
-    const result = await createInvoice(invoiceData);
-
-    if (result.invoice) {
-      setInvoices((current) => [
-        result.invoice,
-        ...current
-      ]);
-    }
-
-    await refreshFinanceData();
-
-    return result.invoice;
+    return result?.invoice || null;
   } catch(error) {
     setApiStatus((current)=>({
       ...current,
@@ -282,15 +251,16 @@ const handleCreateInvoice = useCallback(async (invoiceData) => {
     <UploadInvoice
       onNavigate={navigate}
       onAnalysisComplete={handleAnalysisComplete}
-      onCreateInvoice={handleCreateInvoice}
     />
   );
       case "analysis":
         return <AnalysisResult invoiceId={activeInvoiceId} initialAnalysis={latestAnalysis?.invoiceId === activeInvoiceId ? latestAnalysis : null} />;
       case "transactions":
-        return <Transactions searchQuery={searchQuery} invoices={invoices} apiStatus={apiStatus} onChanged={refreshFinanceData} onNavigate={navigate} />;
+        return <Transactions searchQuery={searchQuery} invoices={invoices} apiStatus={apiStatus} onChanged={refreshFinanceData} onCreate={handleCreateInvoice} onNavigate={navigate} />;
       case "budgets":
         return <BudgetAlerts data={budgetData} apiStatus={apiStatus} onChanged={refreshFinanceAndNotifications} />;
+      case "spending-plan":
+        return <SpendingPlan />;
       case "settings":
         return <Settings profile={account.profile} preferences={account.preferences} loading={account.loading} error={account.error} section={settingsSection} onSectionChange={setSettingsSection} onSaveProfile={saveProfile} onSavePreferences={savePreferences} onUploadAvatar={uploadAvatar} />;
       case "dashboard":
@@ -334,6 +304,7 @@ const handleCreateInvoice = useCallback(async (invoiceData) => {
       analysis: t("nav.analysis"),
       transactions: t("nav.transactions"),
       budgets: t("nav.budgets"),
+      "spending-plan": t("nav.spendingPlan"),
       settings: t("nav.settings"),
     }),
     [t]

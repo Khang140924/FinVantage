@@ -3,26 +3,41 @@ import * as response from '../utils/response.js';
 import { logger } from '../utils/logger.js';
 import { requireAuth } from '../utils/cognitoAuth.js';
 
+const safeFailure = (error, fallbackCode = 'PAYMENT_REQUEST_FAILED') => ({
+  name: error?.name || 'PaymentError',
+  code: error?.code || fallbackCode
+});
+
 // Hàm xử lý Lambda (Lambda handler) để xử lý thanh toán (payment processing) liên quan tới hóa đơn
 export const handler = async (event) => {
   const auth = await requireAuth(event);
   if (auth.error) return auth.error;
 
   try {
-    logger.info('Nhận yêu cầu xử lý thanh toán hóa đơn', { event });
+    logger.info('Nhận yêu cầu xử lý thanh toán hóa đơn', {
+      userId: auth.user.sub,
+      method: event?.httpMethod || event?.requestContext?.http?.method
+    });
 
     // Phân tích cú pháp JSON an toàn từ request body
     let body;
     try {
       body = typeof event.body === 'string' ? JSON.parse(event.body) : event.body;
     } catch (parseError) {
-      logger.error('Lỗi khi phân tích cú pháp request body JSON của thanh toán', parseError);
+      logger.error(
+        'Lỗi khi phân tích cú pháp request body JSON của thanh toán',
+        safeFailure(parseError, 'PAYMENT_INVALID_JSON')
+      );
       return response.badRequest('Cấu trúc JSON trong request body không hợp lệ.');
     }
 
     // Xác thực các tham số đầu vào bắt buộc
     if (!body || !body.invoiceId || !body.paymentMethod) {
-      logger.warn('Yêu cầu thanh toán thiếu tham số bắt buộc invoiceId hoặc paymentMethod', { body });
+      logger.warn('Yêu cầu thanh toán thiếu tham số bắt buộc invoiceId hoặc paymentMethod', {
+        userId: auth.user.sub,
+        hasInvoiceId: Boolean(body?.invoiceId),
+        hasPaymentMethod: Boolean(body?.paymentMethod)
+      });
       return response.badRequest('Yêu cầu thiếu tham số bắt buộc: invoiceId hoặc paymentMethod.');
     }
 
@@ -49,8 +64,14 @@ export const handler = async (event) => {
       invoice: updatedInvoice
     });
   } catch (error) {
-    logger.error('Lỗi nghiêm trọng xảy ra trong quá trình xử lý thanh toán', error);
-    return response.serverError(`Đã xảy ra lỗi hệ thống khi xử lý thanh toán: ${error.message}`);
+    logger.error(
+      'Lỗi nghiêm trọng xảy ra trong quá trình xử lý thanh toán',
+      safeFailure(error)
+    );
+    return response.serverError(
+      'Đã xảy ra lỗi hệ thống khi xử lý thanh toán.',
+      'PAYMENT_REQUEST_FAILED'
+    );
   }
 };
 

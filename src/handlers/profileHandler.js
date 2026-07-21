@@ -4,6 +4,11 @@ import { requireAuth } from '../utils/cognitoAuth.js';
 import { logger } from '../utils/logger.js';
 import * as response from '../utils/response.js';
 
+const safeFailure = (error, fallbackCode = 'PROFILE_REQUEST_FAILED') => ({
+  name: error?.name || 'ProfileError',
+  code: error?.code || fallbackCode
+});
+
 const parseBody = (event) => {
   if (!event.body) return {};
   return typeof event.body === 'string' ? JSON.parse(event.body) : event.body;
@@ -49,12 +54,11 @@ export const handler = async (event = {}) => {
       if (method === 'PUT') {
         const body = parseBody(event);
         if (body.language !== undefined && !['en', 'vi'].includes(body.language)) return response.badRequest('language must be en or vi.');
-        const booleanFields = ['darkMode', 'dark_mode', 'emailAlerts', 'email_alerts', 'budgetGuardrails', 'budget_guardrails', 'autoAnalyzeInvoices', 'auto_analyze_invoices'];
+        const booleanFields = ['darkMode', 'dark_mode', 'budgetGuardrails', 'budget_guardrails', 'autoAnalyzeInvoices', 'auto_analyze_invoices'];
         if (booleanFields.some((field) => body[field] !== undefined && typeof body[field] !== 'boolean')) return response.badRequest('Preference toggles must be boolean.');
         const preferences = await updateUserPreferences(auth.user, {
           language: body.language,
           darkMode: body.darkMode ?? body.dark_mode,
-          emailAlerts: body.emailAlerts ?? body.email_alerts,
           budgetGuardrails: body.budgetGuardrails ?? body.budget_guardrails,
           autoAnalyzeInvoices: body.autoAnalyzeInvoices ?? body.auto_analyze_invoices,
         });
@@ -72,8 +76,15 @@ export const handler = async (event = {}) => {
       try {
         return response.success(await generateAvatarUploadUrl(auth.user.sub, body.fileName, body.contentType));
       } catch (error) {
-        logger.warn('Avatar presigned upload URL is unavailable', { userId: auth.user.sub, error: error.name || error.message });
-        return response.sendResponse(503, { error: 'Avatar storage unavailable', message: 'Không thể tạo URL tải ảnh S3. Hãy kiểm tra cấu hình bucket và AWS credentials của backend.' });
+        logger.warn('Avatar presigned upload URL is unavailable', {
+          userId: auth.user.sub,
+          ...safeFailure(error, 'AVATAR_UPLOAD_URL_FAILED')
+        });
+        return response.errorResponse(503, {
+          error: 'Avatar storage unavailable',
+          code: 'AVATAR_STORAGE_UNAVAILABLE',
+          message: 'Không thể tạo URL tải ảnh lúc này.'
+        });
       }
     }
 
@@ -95,7 +106,16 @@ export const handler = async (event = {}) => {
       }
       if (avatarKey !== undefined) {
         try { await verifyAvatarObject(String(avatarKey)); }
-        catch (error) { return response.badRequest(`Không thể xác nhận ảnh S3: ${error.message}`); }
+        catch (error) {
+          logger.warn('Avatar object verification failed', {
+            userId: auth.user.sub,
+            ...safeFailure(error, 'AVATAR_VERIFICATION_FAILED')
+          });
+          return response.badRequest(
+            'Không thể xác nhận ảnh đại diện đã tải lên.',
+            'AVATAR_VERIFICATION_FAILED'
+          );
+        }
       }
       await updateUserProfile(auth.user, {
         displayName: displayName === undefined ? undefined : String(displayName).trim(),
@@ -108,7 +128,7 @@ export const handler = async (event = {}) => {
     }
     return response.sendResponse(405, { message: 'Method not allowed.' });
   } catch (error) {
-    logger.error('Profile API failed', error, { userId: auth.user.sub, method, path });
-    return response.serverError(`Không thể xử lý hồ sơ: ${error.message}`);
+    logger.error('Profile API failed', safeFailure(error), { userId: auth.user.sub, method, path });
+    return response.serverError('Không thể xử lý hồ sơ.', 'PROFILE_REQUEST_FAILED');
   }
 };

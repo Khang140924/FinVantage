@@ -1,0 +1,381 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Parameterized private data infrastructure for FinVantage production:
+  PostgreSQL RDS, RDS Proxy, Secrets Manager, and ElastiCache Valkey.
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: Existing VPC for private application resources.
+  PrivateSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: At least two private subnets in distinct Availability Zones.
+  DatabaseName:
+    Type: String
+    Default: finvantage
+    AllowedPattern: '^[A-Za-z][A-Za-z0-9_]{0,62}$'
+  DatabaseUsername:
+    Type: String
+    Default: finvantage_app
+    AllowedPattern: '^[A-Za-z][A-Za-z0-9_]{0,62}$'
+    Description: Least-privilege runtime database role created by the one-off bootstrap script.
+  DatabaseAdminUsername:
+    Type: String
+    Default: finvantage_admin
+    AllowedPattern: '^[A-Za-z][A-Za-z0-9_]{0,62}$'
+    Description: Database owner used only for migrations and application-role bootstrap.
+  DatabaseInstanceClass:
+    Type: String
+    Default: db.t4g.micro
+  DatabaseAllocatedStorage:
+    Type: Number
+    Default: 20
+    MinValue: 20
+  DatabaseMaxAllocatedStorage:
+    Type: Number
+    Default: 100
+    MinValue: 20
+  DatabaseEngineVersion:
+    Type: String
+    Default: ''
+    Description: Optional PostgreSQL engine version. Empty uses the current RDS default.
+  DatabaseBackupRetentionDays:
+    Type: Number
+    Default: 7
+    MinValue: 1
+    MaxValue: 35
+  DatabaseDeletionProtection:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+  DatabaseMultiAZ:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+  RdsKmsKeyArn:
+    Type: String
+    Default: ''
+    Description: Optional customer-managed KMS key ARN for RDS storage.
+  SecretsKmsKeyArn:
+    Type: String
+    Default: ''
+    Description: Optional customer-managed KMS key ARN for generated secrets.
+  ValkeyNodeType:
+    Type: String
+    Default: cache.t4g.micro
+  ValkeyNodeCount:
+    Type: Number
+    Default: 1
+    AllowedValues: [1, 2]
+  ValkeyEngineVersion:
+    Type: String
+    Default: ''
+    Description: Optional Valkey engine version. Empty uses the current service default.
+  ValkeySnapshotRetentionDays:
+    Type: Number
+    Default: 1
+    MinValue: 0
+    MaxValue: 35
+  ValkeyKmsKeyArn:
+    Type: String
+    Default: ''
+    Description: Optional customer-managed KMS key ARN for cache encryption at rest.
+
+Conditions:
+  HasDatabaseEngineVersion: !Not [!Equals [!Ref DatabaseEngineVersion, '']]
+  HasValkeyEngineVersion: !Not [!Equals [!Ref ValkeyEngineVersion, '']]
+  HasRdsKmsKey: !Not [!Equals [!Ref RdsKmsKeyArn, '']]
+  HasSecretsKmsKey: !Not [!Equals [!Ref SecretsKmsKeyArn, '']]
+  HasValkeyKmsKey: !Not [!Equals [!Ref ValkeyKmsKeyArn, '']]
+  EnableDatabaseDeletionProtection: !Equals [!Ref DatabaseDeletionProtection, 'true']
+  EnableDatabaseMultiAZ: !Equals [!Ref DatabaseMultiAZ, 'true']
+  EnableValkeyHighAvailability: !Equals [!Ref ValkeyNodeCount, '2']
+
+Resources:
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: FinVantage Lambda egress to private data services and HTTPS endpoints
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS through NAT or interface endpoints
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          DestinationSecurityGroupId: !GetAtt RdsProxySecurityGroup.GroupId
+          Description: PostgreSQL through RDS Proxy
+        - IpProtocol: tcp
+          FromPort: 6379
+          ToPort: 6379
+          DestinationSecurityGroupId: !GetAtt ValkeySecurityGroup.GroupId
+          Description: TLS connection to Valkey
+      Tags:
+        - Key: Name
+          Value: finvantage-lambda
+
+  RdsProxySecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: FinVantage RDS Proxy
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          DestinationSecurityGroupId: !GetAtt DatabaseSecurityGroup.GroupId
+      Tags:
+        - Key: Name
+          Value: finvantage-rds-proxy
+
+  DatabaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: FinVantage PostgreSQL RDS
+      VpcId: !Ref VpcId
+      SecurityGroupEgress: []
+      Tags:
+        - Key: Name
+          Value: finvantage-rds
+
+  ValkeySecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: FinVantage ElastiCache Valkey
+      VpcId: !Ref VpcId
+      SecurityGroupEgress: []
+      Tags:
+        - Key: Name
+          Value: finvantage-valkey
+
+  LambdaToRdsProxyIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt RdsProxySecurityGroup.GroupId
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !GetAtt LambdaSecurityGroup.GroupId
+      Description: Lambda to RDS Proxy
+
+  RdsProxyToDatabaseIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt DatabaseSecurityGroup.GroupId
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !GetAtt RdsProxySecurityGroup.GroupId
+      Description: RDS Proxy to PostgreSQL
+
+  LambdaToValkeyIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !GetAtt ValkeySecurityGroup.GroupId
+      IpProtocol: tcp
+      FromPort: 6379
+      ToPort: 6379
+      SourceSecurityGroupId: !GetAtt LambdaSecurityGroup.GroupId
+      Description: Lambda to Valkey TLS endpoint
+
+  DatabaseSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: FinVantage private RDS subnet group
+      SubnetIds: !Ref PrivateSubnetIds
+
+  ValkeySubnetGroup:
+    Type: AWS::ElastiCache::SubnetGroup
+    Properties:
+      Description: FinVantage private Valkey subnet group
+      SubnetIds: !Ref PrivateSubnetIds
+
+  DatabaseSecret:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: FinVantage least-privilege application database credentials
+      KmsKeyId: !If [HasSecretsKmsKey, !Ref SecretsKmsKeyArn, !Ref AWS::NoValue]
+      GenerateSecretString:
+        SecretStringTemplate: !Sub '{"username":"${DatabaseUsername}","dbname":"${DatabaseName}","port":5432}'
+        GenerateStringKey: password
+        PasswordLength: 40
+        ExcludeCharacters: '"@/\\'
+
+  DatabaseAdminSecret:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: FinVantage database owner credentials for migrations and application-role bootstrap
+      KmsKeyId: !If [HasSecretsKmsKey, !Ref SecretsKmsKeyArn, !Ref AWS::NoValue]
+      GenerateSecretString:
+        SecretStringTemplate: !Sub '{"username":"${DatabaseAdminUsername}","dbname":"${DatabaseName}","port":5432}'
+        GenerateStringKey: password
+        PasswordLength: 40
+        ExcludeCharacters: '"@/\\'
+
+  ValkeyAuthSecret:
+    Type: AWS::SecretsManager::Secret
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Description: FinVantage Valkey authentication token
+      KmsKeyId: !If [HasSecretsKmsKey, !Ref SecretsKmsKeyArn, !Ref AWS::NoValue]
+      GenerateSecretString:
+        SecretStringTemplate: '{"username":"default"}'
+        GenerateStringKey: authToken
+        PasswordLength: 40
+        ExcludePunctuation: true
+
+  Database:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      Engine: postgres
+      EngineVersion: !If [HasDatabaseEngineVersion, !Ref DatabaseEngineVersion, !Ref AWS::NoValue]
+      DBName: !Ref DatabaseName
+      DBInstanceClass: !Ref DatabaseInstanceClass
+      AllocatedStorage: !Ref DatabaseAllocatedStorage
+      MaxAllocatedStorage: !Ref DatabaseMaxAllocatedStorage
+      StorageType: gp3
+      StorageEncrypted: true
+      KmsKeyId: !If [HasRdsKmsKey, !Ref RdsKmsKeyArn, !Ref AWS::NoValue]
+      MasterUsername: !Sub '{{resolve:secretsmanager:${DatabaseAdminSecret}:SecretString:username}}'
+      MasterUserPassword: !Sub '{{resolve:secretsmanager:${DatabaseAdminSecret}:SecretString:password}}'
+      BackupRetentionPeriod: !Ref DatabaseBackupRetentionDays
+      CopyTagsToSnapshot: true
+      DeletionProtection: !If [EnableDatabaseDeletionProtection, true, false]
+      MultiAZ: !If [EnableDatabaseMultiAZ, true, false]
+      PubliclyAccessible: false
+      AutoMinorVersionUpgrade: true
+      EnablePerformanceInsights: true
+      EnableCloudwatchLogsExports:
+        - postgresql
+        - upgrade
+      DBSubnetGroupName: !Ref DatabaseSubnetGroup
+      VPCSecurityGroups:
+        - !GetAtt DatabaseSecurityGroup.GroupId
+
+  DatabaseAdminSecretAttachment:
+    Type: AWS::SecretsManager::SecretTargetAttachment
+    Properties:
+      SecretId: !Ref DatabaseAdminSecret
+      TargetId: !Ref Database
+      TargetType: AWS::RDS::DBInstance
+
+  RdsProxyServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: rds.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ReadFinVantageDatabaseSecret
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - !Ref DatabaseSecret
+                  - !Ref DatabaseAdminSecret
+              - !If
+                - HasSecretsKmsKey
+                - Effect: Allow
+                  Action: kms:Decrypt
+                  Resource: !Ref SecretsKmsKeyArn
+                - !Ref AWS::NoValue
+
+  DatabaseProxy:
+    Type: AWS::RDS::DBProxy
+    DependsOn: DatabaseAdminSecretAttachment
+    Properties:
+      DBProxyName: !Sub '${AWS::StackName}-postgres'
+      EngineFamily: POSTGRESQL
+      RoleArn: !GetAtt RdsProxyServiceRole.Arn
+      RequireTLS: true
+      IdleClientTimeout: 1800
+      DebugLogging: false
+      VpcSubnetIds: !Ref PrivateSubnetIds
+      VpcSecurityGroupIds:
+        - !GetAtt RdsProxySecurityGroup.GroupId
+      Auth:
+        - AuthScheme: SECRETS
+          IAMAuth: DISABLED
+          SecretArn: !Ref DatabaseSecret
+        - AuthScheme: SECRETS
+          IAMAuth: DISABLED
+          SecretArn: !Ref DatabaseAdminSecret
+
+  DatabaseProxyTargetGroup:
+    Type: AWS::RDS::DBProxyTargetGroup
+    Properties:
+      DBProxyName: !Ref DatabaseProxy
+      TargetGroupName: default
+      DBInstanceIdentifiers:
+        - !Ref Database
+      ConnectionPoolConfigurationInfo:
+        MaxConnectionsPercent: 80
+        MaxIdleConnectionsPercent: 50
+        ConnectionBorrowTimeout: 120
+
+  ValkeyReplicationGroup:
+    Type: AWS::ElastiCache::ReplicationGroup
+    Properties:
+      ReplicationGroupDescription: FinVantage production session and pipeline state
+      Engine: valkey
+      EngineVersion: !If [HasValkeyEngineVersion, !Ref ValkeyEngineVersion, !Ref AWS::NoValue]
+      CacheNodeType: !Ref ValkeyNodeType
+      NumCacheClusters: !Ref ValkeyNodeCount
+      AutomaticFailoverEnabled: !If [EnableValkeyHighAvailability, true, false]
+      MultiAZEnabled: !If [EnableValkeyHighAvailability, true, false]
+      AtRestEncryptionEnabled: true
+      TransitEncryptionEnabled: true
+      TransitEncryptionMode: required
+      AuthToken: !Sub '{{resolve:secretsmanager:${ValkeyAuthSecret}:SecretString:authToken}}'
+      KmsKeyId: !If [HasValkeyKmsKey, !Ref ValkeyKmsKeyArn, !Ref AWS::NoValue]
+      CacheSubnetGroupName: !Ref ValkeySubnetGroup
+      SecurityGroupIds:
+        - !GetAtt ValkeySecurityGroup.GroupId
+      Port: 6379
+      SnapshotRetentionLimit: !Ref ValkeySnapshotRetentionDays
+      AutoMinorVersionUpgrade: true
+
+Outputs:
+  RdsProxyEndpoint:
+    Description: Set as RDS_PROXY_ENDPOINT for the backend.
+    Value: !GetAtt DatabaseProxy.Endpoint
+  DatabaseSecretArn:
+    Description: Set as DB_SECRET_ARN for the application Lambda functions.
+    Value: !Ref DatabaseSecret
+  DatabaseAdminSecretArn:
+    Description: Use only for the one-off migration and database-role bootstrap jobs.
+    Value: !Ref DatabaseAdminSecret
+  DatabaseEndpoint:
+    Description: Direct RDS endpoint for controlled administration only.
+    Value: !GetAtt Database.Endpoint.Address
+  ValkeyPrimaryEndpoint:
+    Description: TLS Valkey hostname used to construct the secret REDIS_URL.
+    Value: !GetAtt ValkeyReplicationGroup.PrimaryEndPoint.Address
+  ValkeyPort:
+    Value: !GetAtt ValkeyReplicationGroup.PrimaryEndPoint.Port
+  ValkeyAuthSecretArn:
+    Description: Secret containing the Valkey authentication token.
+    Value: !Ref ValkeyAuthSecret
+  LambdaSecurityGroupId:
+    Description: Include in LAMBDA_SECURITY_GROUP_IDS.
+    Value: !GetAtt LambdaSecurityGroup.GroupId
+  PrivateSubnetIds:
+    Description: Include in PRIVATE_SUBNET_IDS.
+    Value: !Join [',', !Ref PrivateSubnetIds]

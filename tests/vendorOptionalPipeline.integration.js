@@ -1,8 +1,12 @@
-import 'dotenv/config';
 import assert from 'node:assert/strict';
+import { assertLocalIntegrationEnvironment } from './localIntegrationGuard.js';
 
+if (process.env.FINVANTAGE_DISABLE_DOTENV !== 'true') await import('dotenv/config');
+
+assertLocalIntegrationEnvironment();
 process.env.USE_MOCK_AUTH = 'true';
 process.env.USE_MOCK_AI = 'true';
+process.env.SNS_BUDGET_ALERTS_TOPIC_ARN = '';
 
 const [
   { handler: analyzeInvoice },

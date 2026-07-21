@@ -8,9 +8,10 @@ Trong môi trường local, mock auth, PostgreSQL Docker và Redis Docker chỉ 
 
 ## 1. Yêu cầu
 
-- Node.js 20 trở lên và npm.
+- Node.js 24 và npm 11 (khớp runtime Lambda và cấu hình build hiện tại).
 - Docker Desktop nếu chạy PostgreSQL và Redis local.
-- AWS CLI/profile hợp lệ chỉ khi dùng Cognito, S3, Textract hoặc Bedrock thật.
+- PostgreSQL client (`psql`) trên host nếu chạy các lệnh khởi tạo schema/migration qua `localhost:5433`.
+- AWS CLI/profile hợp lệ khi dùng S3, Textract, Bedrock, SNS hoặc deploy AWS thật. Đăng nhập Cognito qua OIDC không tự yêu cầu AWS CLI profile.
 - Một bản `.env` local tạo từ `.env.example`. Không commit file này.
 
 Sau khi clone dự án, cài dependencies:
@@ -29,6 +30,7 @@ Các nhóm biến chính:
 | Nhóm | Biến |
 | --- | --- |
 | Auth BFF | `NODE_ENV`, `AUTH_SERVER_PORT`, `SESSION_SECRET`, `USE_MOCK_AUTH` |
+| Frontend auth | `VITE_AUTH_MODE`, `VITE_API_BASE_URL` |
 | Cognito | `COGNITO_ISSUER`, `COGNITO_USER_POOL_ID`, `COGNITO_CLIENT_ID`, `COGNITO_CLIENT_SECRET`, `COGNITO_DOMAIN`, `COGNITO_REDIRECT_URI`, `COGNITO_LOGOUT_URI`, `COGNITO_SCOPES` |
 | AWS | `AWS_REGION`, `AWS_REGION_NAME`, `AWS_PROFILE`, `S3_RAW_BUCKET_NAME`, `PROFILE_AVATAR_BUCKET_NAME`, `BEDROCK_MODEL_ID`, `SNS_BUDGET_ALERTS_TOPIC_ARN` |
 | Database | `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_SSL`, `RDS_PROXY_ENDPOINT` |
@@ -38,19 +40,28 @@ Các nhóm biến chính:
 
 ### Mock local (khuyến nghị khi phát triển UI)
 
+Trong `.env` của backend/Auth BFF:
+
 ```dotenv
 NODE_ENV=development
 USE_MOCK_AUTH=true
 USE_MOCK_AI=true
 DB_HOST=localhost
-DB_PORT=5432
+DB_PORT=5433
 DB_NAME=finvantage
 DB_USER=postgres
 DB_SSL=false
 REDIS_URL=redis://localhost:6379
 ```
 
-Điền `DB_PASSWORD` và `SESSION_SECRET` riêng tại máy local. Không cần Cognito discovery khi `USE_MOCK_AUTH=true`: auth server tạo phiên development, `/auth/me` trả mock user và logout xóa phiên đó. Mock token chỉ được backend chấp nhận khi `USE_MOCK_AUTH=true` hoặc `NODE_ENV=development`; production không fallback sang mock user.
+Trong `frontend/.env.local`:
+
+```dotenv
+VITE_AUTH_MODE=mock
+VITE_API_BASE_URL=http://localhost:3000/dev
+```
+
+Điền `DB_PASSWORD` và `SESSION_SECRET` riêng tại máy local. Không cần Cognito discovery khi `USE_MOCK_AUTH=true`: Auth BFF tạo phiên development, `/auth/me` trả mock user và logout xóa phiên đó. `VITE_AUTH_MODE` và `USE_MOCK_AUTH` phải cùng chế độ; ứng dụng báo lỗi cấu hình hữu hạn nếu thiếu hoặc không khớp, không tự fallback sang Mock User.
 
 ## 3. Khởi động local
 
@@ -60,11 +71,30 @@ REDIS_URL=redis://localhost:6379
 docker compose up -d
 ```
 
-Docker expose PostgreSQL tại `localhost:5432` và Redis tại `localhost:6379`. Khởi tạo database theo schema dự án nếu chưa có dữ liệu:
+PostgreSQL Docker của FinVantage được expose tại host `localhost:5433`, trong khi PostgreSQL bên trong container vẫn dùng port `5432`. Vì vậy PostgreSQL Windows có thể tiếp tục chạy tại `localhost:5432`; đặt `DB_PORT=5433` trong `.env` local để API kết nối đúng database Docker. Redis được expose tại `localhost:6379`.
+
+Mọi thay đổi schema mới đi qua migration runner có ledger/checksum. Runner không tự đọc `.env`; truyền cấu hình database vào process hoặc thêm cờ `--load-dotenv-local` một cách chủ động. Trước tiên chỉ validate file, không kết nối database:
 
 ```powershell
-Get-Content schema.sql | docker exec -i finvantage-postgres psql -U postgres -d finvantage
+npm run db:validate
 ```
+
+Với database Docker **mới, trống**, tạo baseline và áp dụng migration sau khi xác nhận đúng host cổng 5433:
+
+```powershell
+npm run db:migrate:baseline:plan
+node scripts/migrate.js --apply --baseline --load-dotenv-local --confirm-apply=FINVANTAGE_MIGRATION
+```
+
+Với database local đã có schema/dữ liệu, không thêm `--baseline`; xem plan rồi áp dụng các migration idempotent và kiểm tra ledger:
+
+```powershell
+npm run db:migrate:plan
+npm run db:migrate -- --load-dotenv-local --confirm-apply=FINVANTAGE_MIGRATION
+npm run db:migrate:status -- --load-dotenv-local
+```
+
+Chỉ chạy migration và integration test trên PostgreSQL Docker local có thể phục hồi. Runner từ chối remote/production nếu thiếu cờ xác nhận thứ hai; không sửa ledger thủ công.
 
 ### Terminal 2 – API local
 
@@ -73,6 +103,8 @@ npm run api:dev
 ```
 
 Serverless Offline mặc định phục vụ API ở cổng `3000`.
+Serverless Framework v4 yêu cầu đăng nhập hoặc `SERVERLESS_ACCESS_KEY`/`SERVERLESS_LICENSE_KEY`
+ngay cả khi chạy CLI local. Giữ key trong secret store của máy/CI, không ghi vào `.env` hay repository.
 
 ### Terminal 3 – Auth server
 
@@ -81,6 +113,8 @@ npm run auth:dev
 ```
 
 Auth BFF chạy ở cổng `4000`. Vite proxy các đường dẫn `/auth` đến cổng này, vì vậy frontend không nhận hoặc lưu Cognito client secret.
+
+Cổng `4000` là BFF cho cả hai chế độ. Ở chế độ Cognito, tiến trình này không tạo Mock User: nó chỉ thực hiện OIDC redirect/callback, giữ cookie session HTTP-only và logout Cognito. Frontend luôn gọi đường dẫn tương đối `/auth`; không hard-code một mock origin trong bundle.
 
 ### Terminal 4 – Frontend
 
@@ -100,11 +134,13 @@ docker compose down
 
 ### Mock auth
 
-Với `USE_MOCK_AUTH=true`, nhấn **Tiếp tục** ở trang login. Auth BFF tạo session development và trả user mock. Không bật tự động redirect ở trang login để người dùng chủ động bắt đầu đăng nhập.
+Đặt đồng thời `VITE_AUTH_MODE=mock` và `USE_MOCK_AUTH=true`. Form development chỉ xuất hiện trong chế độ này; Auth BFF có thể tạo Mock User để kiểm thử local. Mock identity không được chấp nhận khi frontend/BFF đang ở chế độ Cognito.
 
 ### Cognito thật
 
-Với `USE_MOCK_AUTH=false`, cấu hình đầy đủ các biến Cognito, redirect URI cho frontend và logout URI trong Cognito App Client. Nút **Tiếp tục** chuyển đến Cognito Managed Login. Cognito xử lý đăng ký, xác minh email, quên mật khẩu và đặt lại mật khẩu; ứng dụng không tự lưu mật khẩu.
+Đặt `VITE_AUTH_MODE=cognito` trong `frontend/.env.local` và `USE_MOCK_AUTH=false` trong `.env` của Auth BFF. Cấu hình đầy đủ issuer, app client, domain, redirect URI và logout URI của Cognito; dùng một `SESSION_SECRET` riêng tư đủ mạnh. Không đặt secret vào Vite hoặc source code.
+
+Người dùng chưa có session được chuyển một lần đến Cognito Managed Login; frontend không hiện form đăng nhập giả. Cognito xử lý đăng ký, xác minh email, quên mật khẩu và đặt lại mật khẩu. Nếu thiếu cấu hình hoặc OIDC discovery thất bại, Auth BFF vẫn trả trạng thái readiness có cấu trúc và frontend kết thúc màn hình tải bằng lỗi rõ ràng, thay vì redirect/loading vô hạn.
 
 Sau callback, Auth BFF xác thực mã, giữ session HTTP-only và `/auth/me` trả claims `sub`, `email` cùng `name` hoặc `preferred_username`. Refresh frontend sẽ gọi lại `/auth/me` để khôi phục session. Logout xóa session rồi chuyển đến Cognito logout endpoint. Nếu chưa đăng nhập, protected route quay về login.
 
@@ -112,11 +148,16 @@ Sau callback, Auth BFF xác thực mã, giữ session HTTP-only và `/auth/me` t
 
 1. Chọn JPG/JPEG/PNG/HEIC hoặc PDF hợp lệ. Chọn file **không** tự upload.
 2. Ảnh hiện preview lớn, giữ tỷ lệ và có thể bấm để mở lightbox. PDF hiện card với tên và dung lượng. Nút **Clear** xóa file/preview; object URL được revoke khi thay file, clear hoặc unmount.
-3. Nhấn **Tải lên & Phân tích**: frontend xin import/presigned PUT URL, upload S3, gọi OCR rồi gọi analyze theo `invoiceId`.
-4. Pipeline trạng thái là `UPLOADED → OCR_PROCESSING → ANALYZING → ANALYZED`; lỗi OCR/AI được ghi `OCR_FAILED` hoặc `ANALYSIS_FAILED`.
-5. Frontend polling trạng thái, hiển thị lỗi ngay tại trang upload và điều hướng kết quả bằng `invoiceId` thật, không yêu cầu F5.
+3. Nhấn **Tải lên & Phân tích**: frontend gọi import API. Mọi response thành công phải có `invoiceId`, `fileKey` và `cacheKey`; `uploadUrl` chỉ bắt buộc khi `uploadRequired=true`. Hóa đơn đã phân tích hoặc pipeline có thể tiếp tục an toàn dùng `uploadRequired=false` và không cần ký URL mới.
+4. Bản ghi mới bắt đầu ở `UPLOAD_PENDING` với 0%. Chỉ sau khi import API thành công và presigned PUT trả 2xx, frontend mới hiển thị mốc `UPLOADED` 25% rồi gọi OCR. Backend xác nhận `uploadConfirmed`/trạng thái tiếp theo khi endpoint OCR hoặc S3-triggered handler bắt đầu xử lý object; presigned PUT không tự callback vào backend local.
+5. Pipeline tiếp tục `OCR_PROCESSING → ANALYZING → ANALYZED`; lỗi OCR/AI được ghi `OCR_FAILED` hoặc `ANALYSIS_FAILED`. Presign/PUT thất bại dừng polling, đánh dấu bước upload lỗi và không làm các bước Textract, AI hay database trông như đang chạy.
+6. Frontend hiển thị lỗi an toàn theo mã backend (ví dụ `AWS_CREDENTIALS_MISSING`) và cho phép thử lại; không nhận stack trace hay credential. Kết quả được mở bằng `invoiceId` thật, không yêu cầu F5.
+
+Import API kiểm tra lại cặp phần mở rộng/MIME, tên file và dung lượng khai báo tối đa 10 MB; presigned PUT ký kèm `ContentLength` khi client gửi size. MIME/size này vẫn do client khai báo, nên môi trường production cần kiểm tra metadata/nội dung object sau upload (ví dụ `HeadObject` trước OCR) nếu yêu cầu bảo đảm tuyệt đối.
 
 Trong AWS, S3 trigger hoặc API OCR gọi Textract AnalyzeExpense, kết quả tạm được giữ Redis rồi raw OCR thật được gửi Bedrock. `TOTAL` là bắt buộc; total rỗng tạo `OCR_EMPTY_RESULT` hoặc `OCR_TOTAL_NOT_FOUND`, không gọi AI và không lưu hóa đơn giả. Vendor có thể thiếu: hệ thống dùng `Không xác định` và warning, nhưng vẫn có thể hoàn tất nếu total/ocr hợp lệ.
+
+Luồng S3/Textract thật cần AWS profile/credential còn hiệu lực, đúng region và đủ quyền tối thiểu. Chỉ chạy frontend, Serverless Offline và Redis/PostgreSQL local **không** làm S3 event trên AWS tự gọi một Lambda local; muốn kiểm tra end-to-end phải dùng hạ tầng AWS đã deploy/được phép, hoặc chủ động gọi endpoint OCR local sau khi PUT thật. Không xem việc build/test mock thành bằng chứng AWS thật đã hoạt động.
 
 Mock AI chỉ sinh danh mục và gợi ý từ raw OCR; không được ghi đè vendor, total, ngày hay line item Textract. Idempotency/checksum và upsert theo invoice ID ngăn cùng một file làm tăng dữ liệu Dashboard hai lần.
 
@@ -138,9 +179,10 @@ Tất cả API nghiệp vụ phải lấy user ID từ token/session xác thực
 
 | Nhóm | Endpoint |
 | --- | --- |
-| Invoice | `POST /invoices/import`, `POST /invoices/{id}/ocr`, `POST /invoices/{id}/analyze`, `GET /invoices`, `GET/PUT/DELETE /invoices/{id}`, `GET /invoices/{id}/status` |
+| Invoice | `POST /invoices/import`, `POST /invoices`, `POST /invoices/{id}/ocr`, `POST /invoices/{id}/analyze`, `GET /invoices`, `GET/PUT/DELETE /invoices/{id}`, `GET /invoices/{id}/status` |
 | Tìm kiếm/Dashboard | `GET /search`, `GET /dashboard-summary` |
 | Budget | `GET/POST /budgets`, `DELETE /budgets/{id}` |
+| Spending Plan | `GET/PUT /spending-plan` |
 | Hồ sơ | `GET/PUT /me`, `GET/PUT /me/preferences`, `POST /me/avatar/upload-url` |
 | Thông báo | `GET /notifications`, `GET /notifications/unread-count`, `PUT /notifications/{id}/read`, `PUT /notifications/read-all`, `DELETE /notifications/{id}` |
 | Thanh toán demo | `POST /payment` |
@@ -151,16 +193,31 @@ Budget không cho hạn mức âm, 0 hoặc danh mục trùng trong cùng tháng
 
 ## 8. Kiến trúc AWS production
 
-- **Cognito:** identity, Managed Login và claims. Không lưu password vào Aurora/PostgreSQL.
-- **API Gateway + Lambda:** public API cho profile, preferences, invoice, budget và notification.
-- **Aurora PostgreSQL qua RDS Proxy:** dữ liệu hồ sơ, preference, transaction, budget, notification và metadata.
+- **Cognito:** identity, Managed Login và claims. Không lưu password vào PostgreSQL.
+- **API Gateway + Lambda:** public API nghiệp vụ và Auth BFF `/auth/*`; session Auth được lưu bền vững trong Valkey, không dùng MemoryStore production.
+- **RDS PostgreSQL qua RDS Proxy:** dữ liệu hồ sơ, preference, transaction, budget, notification và metadata.
 - **S3 private:** hóa đơn trong `uploads/`, avatar trong `avatars/`; chỉ Lambda có quyền S3 tối thiểu và frontend dùng presigned URL giới hạn thời gian.
 - **Textract:** `AnalyzeExpense` trích xuất vendor, total, ngày, item, price và raw text.
-- **Redis/ElastiCache:** giữ kết quả OCR/trạng thái pipeline ngắn hạn theo invoice/user.
-- **Bedrock:** phân loại/gợi ý sau khi có OCR hợp lệ.
-- **SNS:** Lambda có thể publish email cảnh báo ngân sách khi `SNS_BUDGET_ALERTS_TOPIC_ARN` được cấu hình. Local để biến này trống.
+- **ElastiCache Valkey (Redis protocol):** giữ Auth session và kết quả OCR/trạng thái pipeline trong namespace riêng theo stage.
+- **Bedrock cross-account:** phân loại/gợi ý sau khi có OCR hợp lệ. Lambda dùng STS AssumeRole; named profile chỉ dùng local.
+- **SNS:** Lambda có thể publish sự kiện cảnh báo ngân sách khi `SNS_BUDGET_ALERTS_TOPIC_ARN` được cấu hình và `budget_guardrails` đang bật. Ứng dụng không còn tùy chọn email riêng; subscription/opt-out của kênh email phải được quản lý ở SNS hoặc lớp phân phối. Local để topic ARN trống.
 
-`serverless.yml` cần được giữ tương thích với IAM tối thiểu: S3 object ở prefix `uploads/` và `avatars/`, Textract AnalyzeExpense, Bedrock InvokeModel và SNS Publish cho topic được chỉ định. Bucket S3 không bật public access.
+`serverless.yml` giữ IAM tối thiểu: S3 object ở prefix `uploads/` và `avatars/`, Textract AnalyzeExpense, Secrets Manager cho đúng database secret, STS AssumeRole cho đúng Bedrock role và SNS Publish cho topic được chỉ định. Quyền `bedrock:InvokeModel` nằm ở role tài khoản Bedrock đích, không nằm trong execution role nguồn. Bucket S3 không bật public access.
+
+Quy trình production đầy đủ, gồm CloudFormation, migration one-off, Serverless v4, Amplify rewrite, Cognito callback, Bedrock trust policy, smoke test và rollback nằm trong [DEPLOYMENT.md](DEPLOYMENT.md). Các lệnh dưới đây chỉ validate/print/package, không deploy; chúng cần bộ biến production hợp lệ và output phải được bảo vệ vì cấu hình resolve có thể chứa secret:
+
+Với Lambda Node.js 24, `serverless.yml` đặt `NODE_EXTRA_CA_CERTS=/var/runtime/ca-cert.pem`
+cho các function kết nối RDS/RDS Proxy. Có thể thay bằng CA bundle đóng gói riêng; không tắt
+`rejectUnauthorized` trong production.
+
+```powershell
+npm run db:validate
+npm run production:validate
+npm run serverless:print:prod
+npm run serverless:package:prod
+```
+
+Không chạy migration production từ máy public. Dùng one-off job trong VPC với RDS Proxy, database secret và hai cờ xác nhận được mô tả trong `DEPLOYMENT.md`.
 
 ## 9. Build, syntax và test an toàn
 
@@ -170,15 +227,26 @@ Chạy frontend production build:
 npm.cmd --prefix frontend run build
 ```
 
-Chạy nhóm unit test UI/OCR:
+Chạy bộ test mặc định an toàn, gồm unit test và local Auth BFF integration; bộ này không cần database hoặc AWS:
 
 ```powershell
-node --test tests/frontendUiHelpers.test.js tests/itemNormalization.test.js tests/textractExpense.test.js
+npm test
 ```
+
+Chạy riêng integration test Spending Plan sau khi đã áp dụng migration vào PostgreSQL Docker local dùng cho test:
+
+```powershell
+npm run test:spending-plan:integration
+```
+
+Integration test này tạo và dọn fixture trong database. Chỉ sử dụng database Docker local có thể hủy bỏ, tuyệt đối không chạy với thông tin kết nối production.
 
 Chạy syntax backend:
 
 ```powershell
+npm run syntax:check
+
+# Hoặc kiểm tra thủ công từng file JavaScript:
 node --check auth-server/index.js
 Get-ChildItem -Recurse -File src,auth-server,tests,frontend\src |
   Where-Object { $_.Extension -in '.js', '.mjs', '.cjs' } |

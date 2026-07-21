@@ -35,10 +35,15 @@ async function readResponseBody(response) {
   const text = await response.text();
   if (!text) return null;
 
+  const contentType = response.headers.get("content-type") || "";
   try {
     return JSON.parse(text);
   } catch {
-    return { message: text };
+    const plainText = /^(text\/plain|application\/problem\+json)/i.test(contentType)
+      && !/^\s*</.test(text)
+      ? text.trim()
+      : "";
+    return plainText ? { message: plainText } : null;
   }
 }
 
@@ -90,6 +95,18 @@ async function getFileSha256(file) {
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
+function getInvoiceContentType(file) {
+  if (file?.type) return file.type;
+  const extension = String(file?.name || "").toLowerCase().match(/(\.[^.]+)$/)?.[1];
+  return {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".heic": "image/heic",
+    ".pdf": "application/pdf",
+  }[extension] || "application/octet-stream";
+}
+
 export async function importInvoice(file) {
   const contentSha256 = await getFileSha256(file);
   return apiRequest("/invoices/import", {
@@ -97,7 +114,8 @@ export async function importInvoice(file) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       fileName: file.name,
-      contentType: file.type || "application/octet-stream",
+      contentType: getInvoiceContentType(file),
+      fileSize: file.size,
       ...(contentSha256 ? { contentSha256 } : {}),
     }),
   });
@@ -115,7 +133,7 @@ export async function uploadInvoiceFile(uploadUrl, file) {
   try {
     response = await fetch(uploadUrl, {
       method: "PUT",
-      headers: { "Content-Type": file.type || "application/octet-stream" },
+      headers: { "Content-Type": getInvoiceContentType(file) },
       body: file,
     });
   } catch (error) {
@@ -206,6 +224,18 @@ export function deleteBudget(budgetId) {
   return apiRequest(`/budgets/${encodeURIComponent(budgetId)}`, { method: "DELETE" });
 }
 
+export function getSpendingPlan(month) {
+  return apiRequest(`/spending-plan?month=${encodeURIComponent(month)}`);
+}
+
+export function saveSpendingPlan(plan) {
+  return apiRequest("/spending-plan", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(plan),
+  });
+}
+
 export function getMe() {
   return apiRequest("/me");
 }
@@ -276,11 +306,12 @@ export function deleteNotification(notificationId) {
   return apiRequest(`/notifications/${encodeURIComponent(notificationId)}`, { method: "DELETE" });
 }
 
-export function createInvoice(data) {
+export function createInvoice(data, idempotencyKey) {
   return apiRequest("/invoices", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
+      ...(idempotencyKey ? { "Idempotency-Key": String(idempotencyKey) } : {}),
     },
     body: JSON.stringify(data),
   });
